@@ -50,8 +50,9 @@ Both output paths have been tested with the attached EOS 7D Mark II and a loopba
 reader; compatibility across common video apps still needs manual testing.
 
 CLI equivalents are `--mjpeg-passthrough` and `--raw-video`.
-**Save changes** prompts you to close and reopen video apps when a picture change
-requires reconnection. Cancel leaves the saved settings and current session unchanged.
+Choices save automatically. If a saved change needs reconnection, the main window
+shows **Apply to current video…**. Choose it when ready and follow the close/reopen
+instructions. Cancel keeps your saved preferences and leaves current video unchanged.
 
 ## Automatic use and resting
 
@@ -78,6 +79,7 @@ Temporary command-line overrides:
 
 ```bash
 camera-bridge force-start   # Keep capture running regardless of detected apps
+camera-bridge force-stop    # Keep camera off, preserving the virtual device
 camera-bridge auto          # Return to automatic use
 ```
 
@@ -90,8 +92,13 @@ camera-bridge stream --always-stream --timeout 0
 
 Settings are stored in `~/.config/canon-webcam/settings.conf`, or under
 `XDG_CONFIG_HOME`. Explicit stream arguments override saved values.
-Notification-only changes do not reconnect the webcam; saving while off does not
-turn it on.
+Changes save automatically after a short pause in editing. Notification-only changes
+do not reconnect the webcam. Other saved changes apply at the next start, or after
+choosing **Apply to current video…**. Saving while off does not turn it on.
+
+The two login options on the main window default to on. Per-user XDG autostart
+overrides store each preference independently, using `Hidden=true` for disabled
+options. Turning off webcam login also disables legacy per-user service enablement.
 
 ## Recovery and status cards
 

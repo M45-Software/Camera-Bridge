@@ -36,7 +36,7 @@ Download a package from [Releases](https://github.com/M45-Software/Camera-Bridge
 then install it from the download folder:
 
 ```bash
-sudo apt install ./camera-bridge_0.2.0_all.deb
+sudo apt install ./camera-bridge_0.2.1_all.deb
 ```
 
 To build it yourself, see [development instructions](docs/development.md).
@@ -51,8 +51,9 @@ If you used the older script installer, follow the
 3. Open OBS, Zoom, Discord, or another video app and select **Camera-Bridge**.
 
 **If a video app was already open, close and reopen it to refresh its camera list.**
-Changing picture settings can also require reopening video apps; the settings
-window prompts you before reconnecting the webcam.
+Settings save automatically. If saved changes need to reconnect the webcam,
+choose **Apply to current video…** when ready; a dialog explains when to reopen
+your video apps.
 
 Native live-view resolution and automatic frame timing are enabled by default.
 The tested EOS 7D Mark II supplies a 1024 × 576 live-view image; other models may differ.
@@ -66,10 +67,17 @@ while camera images are arriving.
 <img src="assets/screenshots/settings-dark.png" alt="Camera Bridge controls in dark mode" width="420">
 <img src="assets/screenshots/tray-menu-dark.png" alt="Tray menu showing camera connection, live view, and video activity" width="360">
 
-**Settings** contains automatic use, the rest delay, problem notifications, and
-login preferences. **Advanced** contains picture settings and connection details.
-Closing the controls window leaves the tray running. **Quit** stops the webcam
-and leaves camera live view before exiting.
+**Make webcam available at login** and **Show tray icon at login** are on the
+main window and enabled by default. Each can be turned off independently.
+
+**Settings** contains automatic use, the rest delay, and problem notifications.
+**Advanced** contains picture settings and connection details. All changes save
+automatically. **Close window** leaves the tray and webcam running. **Quit…**
+asks before stopping the webcam and leaving camera live view.
+
+The tray also offers **Keep camera on**, **Keep camera off**, and **Use automatic
+camera control**. These temporary overrides preserve the virtual device and reset
+when the webcam service restarts.
 
 The video feed also explains when it is waiting, starting, or unable to connect.
 Large symbols remain recognizable in mirrored previews. These are demo renders
@@ -87,7 +95,7 @@ of the actual UI; the app follows your desktop theme.
 | Camera not connected | Check power, the USB data cable, and the camera's USB/Wi-Fi settings. |
 | Camera not responding | Try video/movie mode. Turn the camera off, unplug USB, then turn it on and reconnect. |
 | App is open but the camera does not start | Some apps hide camera use from detection. Turn off **Use the camera automatically** in Settings to keep video on. |
-| JPEG passthrough gives no picture | Turn off experimental JPEG passthrough in Advanced, save, then reopen your video app. Raw video is the default. |
+| JPEG passthrough gives no picture | Turn off experimental JPEG passthrough in Advanced, apply the saved change, then reopen your video app. Raw video is the default. |
 
 For more details, open **Settings → Advanced → Connection details → View logs**, or run:
 
@@ -101,7 +109,7 @@ camera-bridge logs
 Quit the tray before installing a newer `.deb`, then reopen Camera Bridge.
 Saved preferences are retained.
 
-To remove it, turn off **Show the tray icon at login**, quit the app, then run:
+To remove it, turn off both login options on the main window, quit the app, then run:
 
 ```bash
 sudo apt remove camera-bridge

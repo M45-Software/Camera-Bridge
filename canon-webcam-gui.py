@@ -20,6 +20,7 @@ PREVIEW = os.environ.get('CANON_WEBCAM_PREVIEW') == '1'
 CONFIG_ROOT = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
 CONFIG = CONFIG_ROOT / 'canon-webcam/settings.conf'
 AUTOSTART = CONFIG_ROOT / 'autostart/canon-webcam-tray.desktop'
+WEBCAM_AUTOSTART = CONFIG_ROOT / 'autostart/camera-bridge-webcam.desktop'
 COMMAND = os.environ.get('CANON_WEBCAM_COMMAND') or shutil.which('camera-bridge') or shutil.which('canon-webcam') or str(Path(__file__).with_name('canon-webcam.sh'))
 DEFAULTS = dict(WIDTH=1280, HEIGHT=720, FPS=30, CAMERA_FPS=30, AUTO_TIMEOUT=60, SET_VIEWFINDER=1, ON_DEMAND=1, NATIVE_RESOLUTION=1, LIVE_VIEW_SIZE=1, AUTO_FPS=1, PASSTHROUGH=0, NOTIFICATIONS=1)
 
@@ -83,6 +84,19 @@ def tray_presentation(connected, running, live_view, receiving, starting, proble
     return icon, (connection, camera, video)
 
 
+def startup_enabled(path):
+    try:
+        return not any(line.strip().lower() == 'hidden=true' for line in path.read_text().splitlines())
+    except FileNotFoundError:
+        return True  # Packaged XDG entries enable both options by default.
+
+
+def write_startup(path, enabled, tray):
+    atomic_write(path, '[Desktop Entry]\nType=Application\nName=Camera Bridge' + (' Tray' if tray else ' Webcam') +
+                 '\nExec=/usr/bin/camera-bridge ' + ('tray' if tray else 'start') +
+                 '\nIcon=camera-bridge\nTerminal=false\nHidden=' + ('false' if enabled else 'true') + '\n')
+
+
 def read_settings():
     values = {}
     if CONFIG.exists():
@@ -107,13 +121,16 @@ class Webcam(QWidget):
         self.app = app
         self.setWindowTitle('Camera Bridge — Preview' if PREVIEW else 'Camera Bridge')
         self.setWindowIcon(app.windowIcon())
-        self.resize(420, 300)
+        self.resize(420, 450)
         self.running = False
         self.busy = False
         self.pending_action = None
         self.quitting = False
         self.action_buttons = []
         self.saved_values = None
+        self.applied_values = None
+        self.startup_ready = False
+        self.legacy_login_enabled = False
         self.quit_requested = False
         self.last_problem = None
         self.last_notification_at = 0
@@ -156,7 +173,11 @@ class Webcam(QWidget):
         settings = QPushButton('Settings…')
         settings.clicked.connect(self.open_settings)
         footer.addWidget(settings)
-        quit_button = QPushButton('Quit')
+        self.close_button = QPushButton('Close window')
+        self.close_button.setToolTip('Hide this window. The tray and webcam keep running.')
+        self.close_button.clicked.connect(self.close_window)
+        footer.addWidget(self.close_button)
+        quit_button = QPushButton('Quit…')
         self.quit_button = quit_button
         quit_button.setToolTip('Stop the webcam and exit.')
         quit_button.clicked.connect(self.quit_and_stop)
@@ -166,7 +187,38 @@ class Webcam(QWidget):
             preview = QLabel('Temporary preview · your installation is unchanged')
             preview.setWordWrap(True)
             layout.addWidget(preview)
+        self.boot = QCheckBox('Make webcam available at login')
+        self.boot.setToolTip('Keep Camera-Bridge ready for video apps after signing in. The camera starts when needed.')
+        self.login = QCheckBox('Show tray icon at login')
+        self.login.setToolTip('Keep camera status and controls near the clock after signing in.')
+        self.boot.setChecked(startup_enabled(WEBCAM_AUTOSTART))
+        self.login.setChecked(startup_enabled(AUTOSTART))
+        self.boot.setEnabled(not PREVIEW)
+        self.login.setEnabled(not PREVIEW)
+        layout.insertWidget(layout.count()-1, self.boot)
+        layout.insertWidget(layout.count()-1, self.login)
+        self.main_feedback = QLabel('Changes save automatically.')
+        self.main_feedback.setWordWrap(True)
+        layout.insertWidget(layout.count()-1, self.main_feedback)
+        self.apply_button = QPushButton('Apply to current video…')
+        self.apply_button.setToolTip('Reconnect the webcam to use saved picture and camera settings. You will be asked to close video apps.')
+        self.apply_button.clicked.connect(self.save_changed_settings)
+        self.apply_button.hide()
+        layout.insertWidget(layout.count()-1, self.apply_button)
+        self.action_buttons.append(self.apply_button)
         self.build_settings()
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setSingleShot(True)
+        self.autosave_timer.setInterval(500)
+        self.autosave_timer.timeout.connect(self.autosave)
+        for field in self.fields.values():
+            field.valueChanged.connect(self.queue_autosave)
+        for box in (self.native, self.auto_fps, self.passthrough, self.on_demand,
+                    self.auto_pause, self.viewfinder, self.notifications):
+            box.toggled.connect(self.queue_autosave)
+        self.size.currentIndexChanged.connect(self.queue_autosave)
+        self.boot.toggled.connect(self.save_startup)
+        self.login.toggled.connect(self.save_startup)
         self.tray_icons = {name: tray_icon(name) for name in ('ready', 'live', 'live-dim', 'off', 'connected', 'awake', 'starting', 'warning')}
         self.tray = QSystemTrayIcon(self.tray_icons['off'], self)
         self.tray_state = 'off'
@@ -185,7 +237,11 @@ class Webcam(QWidget):
         menu.addSeparator()
         menu.addAction('Open Camera Bridge…', self.open)
         menu.addSeparator()
-        menu.addAction('Quit and stop webcam', self.quit_and_stop)
+        menu.addAction('Keep camera on', lambda: self.control('force-start'))
+        menu.addAction('Keep camera off', lambda: self.control('force-stop'))
+        menu.addAction('Use automatic camera control', lambda: self.control('auto'))
+        menu.addSeparator()
+        menu.addAction('Quit and stop webcam…', self.quit_and_stop)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(lambda reason: self.open() if reason in
                                    (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) else None)
@@ -218,7 +274,6 @@ class Webcam(QWidget):
 
         video = section('Video')
         automation = section('Automation')
-        startup = section('Startup')
         troubleshoot = section('Troubleshooting')
         self.fields = {}
 
@@ -271,14 +326,14 @@ class Webcam(QWidget):
         self.auto_fps.toggled.connect(lambda checked: self.fields['CAMERA_FPS'].setEnabled(not checked))
         self.passthrough = checkbox(video, 'Pass JPEG through unchanged',
                                     'Lower processing cost; needs native size and app MJPEG support. '
-                                    'Turn off for raw-video compatibility. Save changes, then reopen the camera in your video app.', False)
+                                    'Turn off for raw-video compatibility. Apply the saved change, then reopen your video app.', False)
         warning_path = Path(__file__).parent / 'assets/warning.svg'
         if not warning_path.exists():
             warning_path = Path('/usr/share/canon-webcam/warning.svg')
         self.passthrough.setIcon(QIcon(str(warning_path)))
         self.passthrough.description_label.setText(
             'Experimental — some apps may show no camera or a black image. Raw video is recommended. '
-            'To switch: close video apps, save changes, then reopen them.')
+            'To switch: close video apps, apply the saved change, then reopen them.')
         self.passthrough.description_label.setStyleSheet('color: #ef6666;')
         self.passthrough.toggled.connect(lambda checked: self.native.setChecked(True) if checked else None)
         self.on_demand = checkbox(automation, 'Use the camera automatically',
@@ -295,16 +350,6 @@ class Webcam(QWidget):
         self.notifications = checkbox(automation, 'Camera problem notifications',
                                       'Show recovery instructions in a tray notification. '
                                       'The video feed shows them even when notifications are off.', True)
-        self.boot = checkbox(startup, 'Make the webcam available at login',
-                             'Make Camera-Bridge ready when you sign in. Video starts when an app needs it.', False)
-        self.login = checkbox(startup, 'Show the tray icon at login',
-                              'Keep the camera controls near the clock. This does not turn the webcam on by itself.', AUTOSTART.exists())
-        if PREVIEW:
-            self.boot.setEnabled(False)
-            self.login.setEnabled(False)
-            message = QLabel('Startup preferences are unavailable in the temporary preview.')
-            message.setWordWrap(True)
-            startup.addRow(message)
         message = QLabel('If an open app cannot find Camera-Bridge, restart that app. '
                          'After changing picture settings, save changes and reopen the camera in your video app.')
         message.setWordWrap(True)
@@ -319,17 +364,13 @@ class Webcam(QWidget):
         self.setup = QPushButton('Set up webcam')
         self.setup.clicked.connect(lambda: self.run(COMMAND, ['setup-user']))
         troubleshoot.addRow(self.setup)
-        note = QLabel('Saving picture changes briefly reconnects the webcam. Your video app may need to reopen it.')
+        note = QLabel('Changes save automatically. Apply to current video from the main window when ready; video apps may need reopening.')
         note.setWordWrap(True)
         layout.addWidget(note)
         self.advanced_feedback = QLabel('')
         self.advanced_feedback.setWordWrap(True)
         layout.addWidget(self.advanced_feedback)
         row = QHBoxLayout()
-        save = QPushButton('Save changes')
-        save.clicked.connect(self.save_changed_settings)
-        self.action_buttons.append(save)
-        row.addWidget(save)
         close = QPushButton('Close')
         close.clicked.connect(self.advanced.hide)
         row.addWidget(close)
@@ -344,10 +385,7 @@ class Webcam(QWidget):
         preferences_layout.addWidget(self.preferences_tabs, 1)
         general_page = self.tabs.widget(1)
         self.tabs.removeTab(1)
-        startup_page = self.tabs.widget(1)
-        self.tabs.removeTab(1)
         self.preferences_tabs.addTab(general_page, 'General')
-        self.preferences_tabs.addTab(startup_page, 'When I sign in')
         self.tabs.setTabText(1, 'Connection details')
         self.settings_feedback = QLabel('')
         self.settings_feedback.setWordWrap(True)
@@ -357,10 +395,6 @@ class Webcam(QWidget):
         advanced.clicked.connect(self.open_advanced)
         row.addWidget(advanced)
         row.addStretch()
-        save = QPushButton('Save changes')
-        save.clicked.connect(self.save_changed_settings)
-        self.action_buttons.append(save)
-        row.addWidget(save)
         close = QPushButton('Close')
         close.clicked.connect(self.preferences.hide)
         row.addWidget(close)
@@ -381,6 +415,11 @@ class Webcam(QWidget):
         self.raise_()
         self.activateWindow()
 
+    def close_window(self):
+        self.preferences.hide()
+        self.advanced.hide()
+        self.hide()
+
     def closeEvent(self, event):
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.preferences.hide()
@@ -395,6 +434,7 @@ class Webcam(QWidget):
         self.shutting_down = True
         self.timer.stop()
         self.blink_timer.stop()
+        self.autosave_timer.stop()
         for process in self.findChildren(QProcess):
             try:
                 process.finished.disconnect()
@@ -405,7 +445,26 @@ class Webcam(QWidget):
             except (RuntimeError, TypeError):
                 pass
 
+    def confirm_quit(self):
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle('Quit Camera Bridge?')
+        dialog.setText('Quitting stops the webcam and turns off camera live view.')
+        dialog.setInformativeText('To keep the webcam available, choose Close window instead.')
+        quit_button = dialog.addButton('Quit and stop webcam', QMessageBox.DestructiveRole)
+        close_button = dialog.addButton('Close window', QMessageBox.ActionRole)
+        dialog.addButton(QMessageBox.Cancel)
+        dialog.setDefaultButton(QMessageBox.Cancel)
+        dialog.exec_()
+        if dialog.clickedButton() == close_button:
+            self.close_window()
+        return dialog.clickedButton() == quit_button
+
     def quit_and_stop(self):
+        if not self.quitting and not self.confirm_quit():
+            return
+        self.autosave_timer.stop()
+        if self.initialized and not self.busy:
+            self.save(False)
         self.quitting = True
         self.quit_requested = True
         self.operation_feedback()
@@ -472,13 +531,14 @@ class Webcam(QWidget):
                 'start': ('Turning on…', 'Making your webcam available to apps.'),
                 'stop': ('Turning off…', 'Releasing the camera connection. This can take a few seconds.'),
                 'restart': ('Applying changes…', 'Reconnecting the webcam to apply your picture settings.'),
+                'force-stop': ('Pausing camera…', 'Turning off live view while keeping the virtual webcam available.'),
                 'force-start': ('Updating camera control…', 'Requesting manual camera control.'),
                 'retry': ('Trying again…', 'Checking the connection and requesting a fresh attempt.'),
                 'auto': ('Updating…', 'Returning to automatic camera control.'),
             }
             headline, explanation = messages.get(self.pending_action, ('Saving…', 'Applying your preferences.'))
         else:
-            self.quit_button.setText('Quit')
+            self.quit_button.setText('Quit…')
             self.toggle.setText('Turn off' if self.running else 'Turn on')
             return
         self.status.setText(headline)
@@ -500,6 +560,7 @@ class Webcam(QWidget):
     def status_ready(self):
         output = bytes(self.poll.readAllStandardOutput()).decode(errors='replace')
         props = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+        self.legacy_login_enabled = props.get('UnitFileState') == 'enabled'
         state = props.get('ActiveState', 'unavailable')
         if self.poll.exitCode() != 0:
             state = 'unavailable (systemd user session required)'
@@ -557,7 +618,10 @@ class Webcam(QWidget):
                 app_names = list(dict.fromkeys(client['name'] for client in usage['clients']))
             except (NameError, KeyError, TypeError):
                 pass
-            if headline == 'Camera not responding':
+            if usage.get('manual_off'):
+                headline = 'Camera kept off'
+                summary = 'Video is paused. Use the tray menu to start the camera or return to automatic control.'
+            elif headline == 'Camera not responding':
                 summary = 'Try video/movie mode. Check camera power and USB. Retrying automatically while an app needs it.'
             elif headline == 'Camera disconnected':
                 summary = 'Check the USB connection and camera power.'
@@ -609,7 +673,6 @@ class Webcam(QWidget):
             for key in ('WIDTH', 'HEIGHT'):
                 self.fields[key].setEnabled(not self.native.isChecked())
             self.size.setCurrentIndex(self.size.findData(values['LIVE_VIEW_SIZE']))
-            self.boot.setChecked(props.get('UnitFileState') == 'enabled')
             self.initialized = True
         if self.native.isChecked():
             try:
@@ -629,6 +692,10 @@ class Webcam(QWidget):
                 self.native_size.setText('Waiting for camera — native size is detected automatically.')
         if self.saved_values is None:
             self.saved_values = self.current_values()
+        if self.applied_values is None:
+            self.applied_values = self.current_values()
+        self.startup_ready = True
+        self.update_pending_settings()
         self.retry.setVisible(self.running and headline in ('Camera not responding', 'Camera disconnected'))
         if not self.busy and not self.quitting:
             self.report_problem(headline, summary)
@@ -654,6 +721,10 @@ class Webcam(QWidget):
                                       headline == 'Camera not responding', apps)
         if identity and self.running and headline == 'Getting video ready…':
             icon, rows = 'starting', (rows[0], 'Checking camera…', 'Preparing video')
+        if self.running and usage.get('manual_off'):
+            icon, rows = ('connected' if identity else 'off'), (rows[0], 'Camera kept off', 'Video paused')
+        elif self.running and usage.get('manual_override'):
+            rows = (rows[0], rows[1], rows[2] + ' · kept on')
         for action, label in zip((self.menu_camera, self.menu_live_view, self.menu_video), rows):
             action.setText(label)
         self.menu_camera.setIcon(self.tray_icons['connected' if identity else 'off'])
@@ -704,20 +775,57 @@ class Webcam(QWidget):
         return values
 
     def settings_message(self, message):
+        self.main_feedback.setText(message)
         self.settings_feedback.setText(message)
         self.advanced_feedback.setText(message)
 
-    def save_changed_settings(self):
-        if self.busy or not self.initialized:
-            return
+    def camera_settings_changed(self):
         current = self.current_values()
         relevant = set(current) - {'NOTIFICATIONS'}
         if current['NATIVE_RESOLUTION']:
             relevant -= {'WIDTH', 'HEIGHT'}
         if current['AUTO_FPS']:
             relevant.discard('CAMERA_FPS')
-        changed = any(current[key] != (self.saved_values or {}).get(key) for key in relevant)
-        self.save(self.running and changed)
+        return any(current[key] != (self.applied_values or current).get(key) for key in relevant)
+
+    def update_pending_settings(self):
+        if not self.running:
+            self.applied_values = self.current_values()
+        self.apply_button.setVisible(self.running and self.camera_settings_changed())
+
+    def queue_autosave(self, *_):
+        if self.initialized and not self.quitting and not self.shutting_down:
+            self.autosave_timer.start()
+
+    def autosave(self):
+        if self.busy:
+            self.autosave_timer.start()
+            return
+        if self.current_values() != self.saved_values:
+            self.save(False)
+
+    def save_startup(self, *_):
+        if not self.startup_ready or PREVIEW:
+            return
+        if self.busy:
+            QTimer.singleShot(250, self.save_startup)
+            return
+        try:
+            write_startup(AUTOSTART, self.login.isChecked(), True)
+            write_startup(WEBCAM_AUTOSTART, self.boot.isChecked(), False)
+        except OSError as error:
+            self.settings_message('Could not save login options: ' + str(error))
+            return
+        self.settings_message('Login options saved.')
+        # Disable any legacy per-user enablement when the user turns login off.
+        if not self.boot.isChecked() and self.legacy_login_enabled:
+            self.run('systemctl', ['--user', 'disable', SERVICE])
+
+    def save_changed_settings(self):
+        if self.busy or not self.initialized:
+            return
+        self.autosave_timer.stop()
+        self.save(self.running and self.camera_settings_changed())
 
     def reconnect_dialog(self):
         parent = self.advanced if self.advanced.isVisible() else self.preferences if self.preferences.isVisible() else self
@@ -748,37 +856,27 @@ class Webcam(QWidget):
             return
         values['LIVE_VIEW_SIZE'] = self.size.currentData()
         if values['WIDTH'] % 2 or values['HEIGHT'] % 2:
-            QMessageBox.warning(self, 'Video size', 'Width and height must be even for YUV420 video.')
+            self.settings_message('Width and height must be even. This change has not been saved.')
             return
         if restart and not self.confirm_reconnect():
-            self.settings_message('Changes not applied. Your current settings are unchanged.')
+            self.settings_message('Saved preferences kept. Current video is unchanged; apply when ready.')
             return
         try:
             atomic_write(CONFIG, ''.join(f'{key}={value}\n' for key, value in values.items()))
-            if PREVIEW:
-                pass
-            elif self.login.isChecked():
-                atomic_write(AUTOSTART, '[Desktop Entry]\nType=Application\nName=Camera Bridge Tray\n'
-                             'Exec=/usr/bin/env camera-bridge tray\nIcon=camera-bridge\nTerminal=false\n')
-            else:
-                AUTOSTART.unlink(missing_ok=True)
         except OSError as error:
             QMessageBox.warning(self, 'Cannot save settings', str(error))
             return
         self.saved_values = values.copy()
-        self.settings_message('Saving changes…')
         def saved():
-            self.settings_message('Saved. Reopen the camera in your video app if the picture does not return.'
-                                  if restart else 'Saved.')
-        def apply_changes():
-            if restart:
-                self.run(COMMAND, ['restart'], saved)
-            else:
-                saved()
-        if PREVIEW:
-            apply_changes()
-            return
-        self.run('systemctl', ['--user', 'enable' if self.boot.isChecked() else 'disable', SERVICE], apply_changes)
+            if restart or not self.running:
+                self.applied_values = values.copy()
+            self.update_pending_settings()
+            self.settings_message('Saved. Apply to current video when ready; video apps will need reopening.'
+                                  if self.running and self.camera_settings_changed() else 'Saved automatically.')
+        if restart:
+            self.run(COMMAND, ['restart'], saved)
+        else:
+            saved()
 
     def logs(self):
         self.log_window = QWidget()
@@ -799,6 +897,7 @@ class Webcam(QWidget):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName('Camera Bridge')
+    app.setDesktopFileName('camera-bridge')
     app.setQuitOnLastWindowClosed(False)
     icon_path = Path(__file__).parent / 'assets/canon-webcam.svg'
     icon = QIcon(str(icon_path)) if icon_path.exists() else QIcon.fromTheme('camera-bridge', QIcon.fromTheme('camera-web'))

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-version="${1:-0.2.0}"
+version="${1:-0.2.1}"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Use a version such as 0.2.0' >&2; exit 1; }
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/DEBIAN" "$stage/usr/bin" "$stage/usr/share/canon-webcam" \
   "$stage/usr/share/applications" "$stage/usr/share/icons/hicolor/scalable/apps" \
-  "$stage/usr/lib/systemd/user" "$stage/etc/modules-load.d" "$stage/etc/modprobe.d" \
+  "$stage/usr/lib/systemd/user" "$stage/etc/xdg/autostart" "$stage/etc/modules-load.d" "$stage/etc/modprobe.d" \
   "$stage/usr/share/doc/canon-webcam" "$root/dist"
 install -m 0755 "$root/canon-webcam.sh" "$stage/usr/bin/camera-bridge"
 ln -s camera-bridge "$stage/usr/bin/canon-webcam"
@@ -23,7 +23,7 @@ install -m 0644 "$root"/docs/*.md "$stage/usr/share/doc/canon-webcam/docs/"
 mkdir -p "$stage/usr/share/doc/canon-webcam/assets/screenshots"
 install -m 0644 "$root"/assets/screenshots/*.png "$root"/assets/screenshots/*.gif "$stage/usr/share/doc/canon-webcam/assets/screenshots/"
 install -m 0644 "$root/packaging/canon-webcam.service" "$stage/usr/lib/systemd/user/"
-cat > "$stage/usr/share/applications/canon-webcam.desktop" <<'EOF'
+cat > "$stage/usr/share/applications/camera-bridge.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=Camera Bridge
@@ -39,6 +39,25 @@ Actions=Tray;
 Name=Show tray icon
 Exec=/usr/bin/camera-bridge tray
 EOF
+# Per-user Hidden=true overrides let either login default be disabled independently.
+for mode in tray webcam; do
+  entry=canon-webcam-tray.desktop
+  command=tray
+  name="Camera Bridge Tray"
+  if [[ "$mode" == webcam ]]; then
+    entry=camera-bridge-webcam.desktop
+    command=start
+    name="Camera Bridge Webcam"
+  fi
+  cat > "$stage/etc/xdg/autostart/$entry" <<EOF
+[Desktop Entry]
+Type=Application
+Name=$name
+Exec=/usr/bin/camera-bridge $command
+Icon=camera-bridge
+Terminal=false
+EOF
+done
 printf 'v4l2loopback\n' > "$stage/etc/modules-load.d/canon-webcam.conf"
 printf 'options v4l2loopback devices=1 video_nr=42 card_label=Camera-Bridge exclusive_caps=0 max_buffers=2\n' > "$stage/etc/modprobe.d/canon-webcam.conf"
 cat > "$stage/DEBIAN/control" <<EOF
@@ -58,8 +77,8 @@ Description: Virtual webcam for compatible Canon cameras with KDE tray controls
  Persistent gphoto2 and ffmpeg virtual webcam with status cards,
  automatic app-driven capture, native resolution, and idle live-view shutdown, and Qt settings and tray controls.
 EOF
-printf '/etc/modules-load.d/canon-webcam.conf\n/etc/modprobe.d/canon-webcam.conf\n' > "$stage/DEBIAN/conffiles"
-# Package install never starts capture, enables lingering, or changes user sessions.
+printf '/etc/modules-load.d/canon-webcam.conf\n/etc/modprobe.d/canon-webcam.conf\n/etc/xdg/autostart/canon-webcam-tray.desktop\n/etc/xdg/autostart/camera-bridge-webcam.desktop\n' > "$stage/DEBIAN/conffiles"
+# Login defaults apply on the next graphical sign-in; installation does not start capture.
 cat > "$stage/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e

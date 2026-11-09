@@ -1009,6 +1009,7 @@ run_test_source_feeder_ffmpeg() {
   [[ -n "$asset_dir" ]] || asset_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/assets"
   [[ -f "$asset_dir/status-idle.png" ]] || asset_dir=/usr/share/canon-webcam
   case "$message" in
+    "Camera kept off") detail="Use the tray controls to start video." ;;
     "Getting video ready...") detail="Checking the camera connection..." ;;
     "Camera not responding") icon=warning; detail="Try video mode or turn camera off and on. Check USB." ;;
     "Camera disconnected") icon=disconnected; detail="Check the USB connection and camera power." ;;
@@ -1190,7 +1191,9 @@ standby_encoding() {
   if [[ -r "${CANON_WEBCAM_DEMAND_FILE:-}" ]]; then
     read -r wants <"$CANON_WEBCAM_DEMAND_FILE" || true
   fi
-  if (( CAMERA_RECOVERY_WAIT == 1 )) || [[ "$wants" == 1 ]]; then
+  if [[ -f "${CANON_WEBCAM_PAUSE_FILE:-}" ]]; then
+    card="Camera kept off"
+  elif (( CAMERA_RECOVERY_WAIT == 1 )) || [[ "$wants" == 1 ]]; then
     if timeout --kill-after=1 3 gphoto2 --auto-detect | awk 'NR > 2 && NF { found = 1 } END { exit !found }'; then
       card="Camera not responding"
     else
@@ -1204,6 +1207,15 @@ standby_encoding() {
   log "Video paused; virtual webcam remains available. Waiting for an app."
   while (( CAMERA_IDLE == 1 )); do
     if (( END_LIVE_VIEW == 1 )); then camera_end_live_view; fi
+    if [[ -f "${CANON_WEBCAM_PAUSE_FILE:-}" && "$card" != "Camera kept off" ]]; then
+      card="Camera kept off"
+      start_background_test_source "$card"
+      write_stream_state "Standby: $card. Virtual webcam ready."
+    elif [[ ! -f "${CANON_WEBCAM_PAUSE_FILE:-}" && "$card" == "Camera kept off" ]]; then
+      card="Waiting for a video app"
+      start_background_test_source "$card"
+      write_stream_state "Standby: $card. Virtual webcam ready."
+    fi
     wants=1
     if (( ON_DEMAND == 1 )); then
       wants=0
@@ -1418,6 +1430,24 @@ service_start() {
   systemctl_user reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
   log "Starting $SERVICE_NAME"
   systemctl_user start "$SERVICE_NAME"
+}
+
+signal_camera_control() {
+  local signal="$1" attempt pid ready_pid
+  local marker="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/canon-webcam/control-pid"
+  # A Type=simple service can be active before Python installs its handlers.
+  # Wait for this exact main process, preventing an early signal from killing it.
+  for (( attempt = 0; attempt < 50; attempt++ )); do
+    pid="$(systemctl_user show "$SERVICE_NAME" --property=MainPID --value)"
+    ready_pid=""
+    if [[ -r "$marker" ]]; then read -r ready_pid <"$marker" || true; fi
+    if [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" == "$ready_pid" ]]; then
+      systemctl_user kill --kill-whom=main --signal="$signal" "$SERVICE_NAME"
+      return
+    fi
+    sleep 0.1
+  done
+  die "Camera controls are not ready. Turn the webcam off and on, then try again."
 }
 
 service_stop() {
@@ -1677,15 +1707,20 @@ main() {
       ;;
     retry)
       service_start
-      systemctl_user kill --kill-whom=main --signal=SIGHUP "$SERVICE_NAME"
+      signal_camera_control SIGHUP
       ;;
     force-start)
       service_start
-      systemctl_user kill --kill-whom=main --signal=SIGUSR2 "$SERVICE_NAME"
+      signal_camera_control SIGUSR2
+      ;;
+    force-stop)
+      if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
+        signal_camera_control SIGUSR1
+      fi
       ;;
     auto)
       service_start
-      systemctl_user kill --kill-whom=main --signal=SIGCONT "$SERVICE_NAME"
+      signal_camera_control SIGCONT
       ;;
     start)
       service_start

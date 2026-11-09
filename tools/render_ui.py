@@ -70,8 +70,9 @@ def main():
                 raise RuntimeError('Demo service status did not load')
             time.sleep(0.01)
         window.timer.stop()
+        window.startup_ready = False  # Rendering never writes real login preferences.
         window.login.setChecked(True)
-        window.resize(420, 320)
+        window.resize(460, 480)
         window.show()
         app.processEvents()
         assert window.grab().save(str(OUTPUT / 'settings-dark.png'))

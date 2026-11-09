@@ -262,6 +262,8 @@ def watch(seconds, command):
         live_view_stopped = False
         wanted = None
         forced = False
+        forced_off = False
+        pause_file = root / "manual-pause"
         stopping = False
         child = None
         usage_path = None
@@ -269,27 +271,36 @@ def watch(seconds, command):
             usage_path = Path(os.environ['XDG_RUNTIME_DIR']) / 'canon-webcam/usage.json'
             usage_path.parent.mkdir(parents=True, exist_ok=True)
         previous_usage = None
+        control_pid = usage_path.parent / "control-pid" if usage_path else None
 
         def forward(signum, _frame):
-            nonlocal reset_at, idle, stopping, forced, wanted
+            nonlocal reset_at, idle, stopping, forced, forced_off, wanted, demand_mode
             if signum == signal.SIGHUP:
                 reset_at = time.monotonic()
                 idle = False
-                if child is not None and ready.exists() and (wanted or not demand_mode):
+                if child is not None and ready.exists() and not forced_off and (wanted or not demand_mode):
                     child.send_signal(signal.SIGUSR2)
                 return
             if signum == signal.SIGCONT:
+                demand_mode = True
+                forced_off = False
+                pause_file.unlink(missing_ok=True)
                 forced = False
                 wanted = None
                 return
+            if signum == signal.SIGUSR1:
+                forced_off = True
+                forced = False
+                wanted = None
+                pause_file.touch()
+                return
             if signum == signal.SIGUSR2:
-                if demand_mode:
-                    forced = True
-                    wanted = None
-                    reset_at = time.monotonic()
-                    return
+                forced = True
+                forced_off = False
+                pause_file.unlink(missing_ok=True)
+                wanted = None
                 reset_at = time.monotonic()
-                idle = False
+                return
             else:
                 stopping = True
             if child is not None and child.poll() is None:
@@ -298,12 +309,14 @@ def watch(seconds, command):
                 elif ready.exists():
                     child.send_signal(signum)
 
-        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR2, signal.SIGCONT, signal.SIGHUP):
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1, signal.SIGUSR2, signal.SIGCONT, signal.SIGHUP):
             signal.signal(signum, forward)
+        if control_pid:
+            control_pid.write_text(str(os.getpid()))
         environment = dict(os.environ, CANON_WEBCAM_ACTIVITY_FILE=str(path),
                            CANON_WEBCAM_CONTROL_READY=str(ready), CANON_WEBCAM_DEMAND_FILE=str(wanted_file),
                            CANON_WEBCAM_START_IDLE=str(int(demand_mode)), CANON_WEBCAM_WATCHED='1',
-                           CANON_WEBCAM_FRAME_STATS=str(stats_file))
+                           CANON_WEBCAM_FRAME_STATS=str(stats_file), CANON_WEBCAM_PAUSE_FILE=str(pause_file))
         child = subprocess.Popen(command, env=environment, start_new_session=True)
         try:
             while child.poll() is None:
@@ -314,10 +327,11 @@ def watch(seconds, command):
                         os.killpg(child.pid, signal.SIGKILL)
                         return child.wait()
                 now = time.monotonic()
-                if demand_mode and ready.exists():
-                    clients, uncertain = consumers(os.environ.get('CANON_WEBCAM_DEVICE', '/dev/video42'), child.pid)
-                    desired = bool(clients) or forced
-                    usage = {'clients': clients, 'uncertain': uncertain, 'automatic': True, 'manual_override': forced}
+                if ready.exists():
+                    clients, uncertain = consumers(os.environ.get('CANON_WEBCAM_DEVICE', '/dev/video42'), child.pid) if demand_mode else ([], False)
+                    desired = not forced_off and (bool(clients) or forced or not demand_mode)
+                    usage = {'clients': clients, 'uncertain': uncertain, 'automatic': demand_mode,
+                             'manual_override': forced, 'manual_off': forced_off}
                     try:
                         stats = json.loads(stats_file.read_text())
                         if desired and now - stats['last_frame'] < 2:
@@ -342,20 +356,9 @@ def watch(seconds, command):
                                 idle = True
                                 paused_at = now
                                 child.send_signal(signal.SIGUSR1)
-                    if not desired and seconds > 0 and not live_view_stopped and now - no_clients_since >= seconds:
+                    if not desired and not live_view_stopped and (forced_off or (seconds > 0 and now - no_clients_since >= seconds)):
                         live_view_stopped = True
                         child.send_signal(signal.SIGALRM)
-                if not demand_mode and usage_path:
-                    usage = {'clients': [], 'uncertain': False, 'automatic': False, 'manual_override': False}
-                    try:
-                        stats = json.loads(stats_file.read_text())
-                        if now - stats['last_frame'] < 2:
-                            usage.update(camera_fps=round(stats['fps'], 1), camera_frames=stats['frames'])
-                    except (OSError, ValueError, KeyError):
-                        pass
-                    if usage != previous_usage:
-                        write_json(usage_path, usage)
-                        previous_usage = usage
                 last_frame = reset_at
                 try:
                     last_frame = max(last_frame, float(path.read_text()))
@@ -386,6 +389,12 @@ def watch(seconds, command):
                     child.wait()
             if usage_path:
                 usage_path.unlink(missing_ok=True)
+            if control_pid:
+                try:
+                    if control_pid.read_text() == str(os.getpid()):
+                        control_pid.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    pass
 
 
 def main():

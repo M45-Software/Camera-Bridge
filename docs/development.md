@@ -7,8 +7,8 @@
 Run from the checkout on Ubuntu/Kubuntu 24.04:
 
 ```bash
-./packaging/build-deb.sh 0.2.0
-sudo apt install ./dist/camera-bridge_0.2.0_all.deb
+./packaging/build-deb.sh 0.2.1
+sudo apt install ./dist/camera-bridge_0.2.1_all.deb
 ```
 
 Packaging needs Bash, Python 3, and `dpkg-deb`; it does not require root.
@@ -17,7 +17,7 @@ The `all` package contains scripts, Qt controls, icons, status-card assets, user
 service, virtual-device defaults, and documentation.
 
 The GitHub Actions release workflow tests pushes to `main` and version tags.
-Pushing a tag such as `v0.2.0` builds a tested package, creates its GitHub release,
+Pushing a tag such as `v0.2.1` builds a tested package, creates its GitHub release,
 and calls the APT publisher directly. Manually published GitHub releases also
 trigger the publisher. Draft releases are rejected. Package versions are immutable:
 change the version whenever package bytes change.
@@ -39,7 +39,7 @@ temporary service/settings. The installed files and saved preferences are retain
 Open **Camera-Bridge** in a video app. Check that capture starts, processing pauses
 when the last preview closes, and live view stops after the rest delay. Try multiple
 apps, USB disconnect/reconnect, camera mode changes, error guidance, and quitting
-while video is active. Reopen video apps after changing picture formats.
+while video is active. Apply auto-saved picture changes when ready, then reopen video apps.
 An existing loopback device may retain its earlier label until reloaded.
 
 ## Automated checks
@@ -84,7 +84,7 @@ This installs dependencies through APT, copies `camera-bridge` to `/usr/local/bi
 writes loopback configuration, installs/enables a per-user service, adds desktop
 launchers, and adds video-group membership if needed. It also tries to enable user
 lingering so the service can start before login. This is separate from Debian
-package installation, which does not enable those startup preferences.
+package installation, which uses graphical-login entries and does not enable lingering.
 
 Use `camera-bridge uninstall` for a source installation and APT removal for a
 packaged installation. Remove a source installation before switching to the `.deb`;

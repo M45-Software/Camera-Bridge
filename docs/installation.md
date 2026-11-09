@@ -10,13 +10,15 @@ live-view support. For long calls, consider AC power and disable camera auto pow
 ## Local Debian package
 
 ```bash
-sudo apt install ./camera-bridge_0.2.0_all.deb
+sudo apt install ./camera-bridge_0.2.1_all.deb
 ```
 
 The architecture-independent package installs the app, icon, systemd user unit,
 and virtual-device defaults. APT resolves native dependencies. Installation tries
-to load the virtual webcam driver but does not start capture or enable autostart.
-Open Camera Bridge and click **Turn on**. Login preferences are in Settings.
+to load the virtual webcam driver but does not start capture during installation.
+At the next graphical sign-in, the webcam becomes available and the tray opens by
+default. Both login options are on the main window and save immediately.
+Open Camera Bridge and click **Turn on** to use it without signing out.
 
 If device permissions prevent access, add yourself to the video group and log out/in:
 
@@ -85,13 +87,14 @@ the packaged service. Saved settings are retained. Older installed `.deb` packag
 named `canon-webcam` are replaced by the `camera-bridge` package through APT.
 
 The packaged command is `camera-bridge`; `canon-webcam` remains an alias.
-Existing `canon-webcam.service`, configuration paths, and desktop-entry IDs are
-retained for compatibility. Use APT to update/remove packaged installations,
+Existing `canon-webcam.service` and configuration paths are retained for
+compatibility. The packaged application entry uses `camera-bridge.desktop` so an
+old user launcher cannot hide it. Use APT to update/remove packaged installations,
 rather than the script's `install` or `uninstall` commands.
 
 ## Remove
 
-Disable **Show the tray icon at login**, quit the app, then run:
+Disable both login options on the main window, quit the app, then run:
 
 ```bash
 sudo apt remove camera-bridge

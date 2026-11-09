@@ -58,6 +58,21 @@ printf 'idle=%s\\n' "$CAMERA_IDLE"
                     os.killpg(process.pid, signal.SIGKILL)
                     process.communicate()
 
+    def test_controls_wait_for_matching_watcher_before_signaling(self):
+        self.env['XDG_RUNTIME_DIR']=str(self.home/'run')
+        marker=self.home/'run/canon-webcam/control-pid'
+        marker.parent.mkdir(parents=True)
+        marker.write_text('2222')
+        result=self.run_script("""
+service_start() { :; }
+systemctl_user() {
+  if [[ "$1" == show ]]; then echo 1111; else echo "control:$*"; fi
+}
+sleep() { printf '1111' >"$XDG_RUNTIME_DIR/canon-webcam/control-pid"; }
+""", 'force-start')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('control:kill --kill-whom=main --signal=SIGUSR2',result.stdout)
+
     def test_config_and_cli_precedence(self):
         self.config('WIDTH=640\nHEIGHT=480\nAUTO_TIMEOUT=120\n')
         result = self.run_script('stream_camera() { echo "$WIDTH/$HEIGHT/$AUTO_TIMEOUT"; }',
