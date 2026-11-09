@@ -20,7 +20,7 @@ Dark-mode renders of the actual app with demo status. The app follows your deskt
 
 **Tray icons**
 
-<img src="assets/screenshots/tray-icons-dark.gif" alt="Six tray states: disconnected, connected, starting, live view on with processing paused, sending video with a blinking activity dot, and needs attention" width="660">
+<img src="assets/screenshots/tray-icons-dark.png" alt="Six tray states: disconnected, connected, starting, live view on with processing paused, sending video with an activity dot, and needs attention" width="660">
 
 <details>
 <summary>Settings, advanced options, and quit confirmation</summary>
