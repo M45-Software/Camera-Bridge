@@ -1,0 +1,14 @@
+[Unit]
+Description=Canon camera virtual webcam
+
+[Service]
+Type=simple
+KillMode=mixed
+TimeoutStopSec=20
+Environment=CANON_WEBCAM_IN_SERVICE=1
+ExecStart=/usr/bin/canon-webcam stream
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

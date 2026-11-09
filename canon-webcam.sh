@@ -1,16 +1,33 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_NAME="canon-webcam"
-SERVICE_NAME="canon-webcam.service"
-INSTALL_PATH="/usr/local/bin/canon-webcam"
+APP_NAME="camera-bridge"
+SERVICE_NAME="${CANON_WEBCAM_SERVICE:-canon-webcam.service}"
+INSTALL_PATH="/usr/local/bin/camera-bridge"
+if [[ "$(readlink -f "${BASH_SOURCE[0]}")" == /usr/bin/camera-bridge ]]; then
+  INSTALL_PATH="/usr/bin/camera-bridge"
+fi
+GUI_PATH="/usr/share/canon-webcam/canon-webcam-gui.py"
+AUTO_TIMEOUT="${CANON_WEBCAM_AUTO_TIMEOUT:-60}"
+CAMERA_IDLE="${CANON_WEBCAM_START_IDLE:-0}"
+ON_DEMAND="${CANON_WEBCAM_ON_DEMAND:-1}"
+NATIVE_RESOLUTION="${CANON_WEBCAM_NATIVE_RESOLUTION:-1}"
+LIVE_VIEW_SIZE="${CANON_WEBCAM_LIVE_VIEW_SIZE:-1}"
+AUTO_FPS="${CANON_WEBCAM_AUTO_FPS:-1}"
+PASSTHROUGH="${CANON_WEBCAM_PASSTHROUGH:-0}"
+LIVE_VIEW_ACTIVE=0
+CAMERA_RESPONSIVE=1
+CAMERA_RECOVERY_WAIT=0
+LAST_CAMERA_ID=""
+END_LIVE_VIEW=0
+CAMERA_READY=0
 
 DEFAULT_VIDEO_NR="42"
-DEFAULT_CARD_LABEL="Canon-Webcam"
+DEFAULT_CARD_LABEL="Camera-Bridge"
 DEFAULT_WIDTH="1280"
 DEFAULT_HEIGHT="720"
-DEFAULT_FPS="12"
-DEFAULT_CAMERA_FPS="12"
+DEFAULT_FPS="30"
+DEFAULT_CAMERA_FPS="30"
 DEFAULT_LOOPBACK_BUFFERS="2"
 DEFAULT_CAMERA_RETRY_DELAY="3"
 DEFAULT_CAMERA_FAILURE_DELAY="5"
@@ -38,6 +55,7 @@ DEVICE="${CANON_WEBCAM_DEVICE:-}"
 DEVICE_EXPLICIT=0
 START_SERVICE=0
 TEST_SOURCE_PID=""
+LAST_STATUS_FRAME=""
 CAMERA_GPHOTO_PID=""
 LOOPBACK_WRITER_PID=""
 CAMERA_FIFO=""
@@ -60,15 +78,21 @@ die() {
 usage() {
   cat <<'USAGE'
 Usage:
-  canon-webcam install [options] [--start]
-  canon-webcam stream [options]
-  canon-webcam start|stop|restart|hard-reset|status|logs|doctor
-  canon-webcam reset-loopback|test-source|install-launchers|remove-launchers|uninstall
+  camera-bridge install [options] [--start]
+  camera-bridge stream [options]
+  camera-bridge tray|settings|setup-user
+  camera-bridge start|stop|restart|hard-reset|status|logs|doctor
+  camera-bridge reset-loopback|test-source|install-launchers|remove-launchers|uninstall
 
 Commands:
   install             Install packages, v4l2loopback config, launchers, and user service.
   stream              Run the Canon -> gphoto2 -> ffmpeg -> virtual webcam pipeline.
-  start               Start the systemd user service.
+  tray                Show the KDE-compatible tray icon and controls.
+  settings            Open the settings and status window.
+  setup-user          Create or refresh per-user service and launchers.
+  start               Enable the webcam; automatic mode waits for an app.
+  force-start         Force capture until auto or restart clears the override.
+  auto                Clear the temporary force-capture override.
   stop                Stop the systemd user service.
   restart             Restart the systemd user service.
   hard-reset          Stop service, clear stale capture processes, reload loopback, restart.
@@ -86,19 +110,29 @@ Options:
   --video-nr N               Virtual webcam number for install-time loopback config.
   --label NAME               Camera label shown to video apps.
   --width PX --height PX     Output frame size.
-  --camera-fps N             Expected Canon live-view input FPS.
-  --fps N                    Virtual webcam output FPS.
+  --mjpeg-passthrough        Copy camera JPEG frames without decoding (requires native size).
+  --raw-video                Decode to raw YUV420 for app compatibility (default).
+  --auto-fps                 Follow camera frame-arrival timing (default).
+  --manual-fps               Use fixed input/output FPS assumptions.
+  --camera-fps N             Expected input FPS in manual timing mode.
+  --fps N                    Nominal webcam FPS (default 30; actual camera rate varies).
   --loopback-buffers N       v4l2loopback queue size, minimum 2.
   --set-viewfinder           Prepare Canon EOS live view before capture.
   --no-set-viewfinder        Skip Canon EOS live-view preparation.
+  --on-demand                Encode when apps open the webcam (default).
+  --always-stream            Bypass app detection for compatibility/manual use.
+  --native-resolution        Use the camera's native live-view size (default).
+  --fixed-resolution         Use --width/--height instead of native size.
+  --live-view-size SIZE       keep|large|medium|small; default large if supported.
+  --timeout SECONDS          Idle live-view / no-image timeout (default 60); 0 disables.
   --start                    Start the service after install.
 
 Defaults:
   Virtual webcam: /dev/video42
-  Camera label:   Canon-Webcam
+  Camera label:   Camera-Bridge
   Stream size:    1280x720
-  Webcam FPS:     12
-  Camera FPS:     12
+  Webcam FPS:     30 nominal
+  Camera FPS:     automatic arrival timing
   Loopback queue: 2 buffers
 
 Run install as your regular desktop user. The script will ask for sudo only for
@@ -106,15 +140,33 @@ system package and kernel module setup.
 
 Examples:
   ./canon-webcam.sh install --start
-  canon-webcam doctor
-  canon-webcam stream --width 640 --height 480
-  canon-webcam hard-reset
+  camera-bridge doctor
+  camera-bridge stream --width 640 --height 480
+  camera-bridge hard-reset
 USAGE
 }
 
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --mjpeg-passthrough) PASSTHROUGH=1; shift ;;
+      --raw-video) PASSTHROUGH=0; shift ;;
+      --auto-fps) AUTO_FPS=1; shift ;;
+      --manual-fps) AUTO_FPS=0; shift ;;
+      --on-demand) ON_DEMAND=1; shift ;;
+      --always-stream) ON_DEMAND=0; shift ;;
+      --native-resolution) NATIVE_RESOLUTION=1; shift ;;
+      --fixed-resolution) NATIVE_RESOLUTION=0; shift ;;
+      --live-view-size)
+        [[ $# -ge 2 ]] || die "--live-view-size requires keep, large, medium, or small"
+        case "$2" in keep) LIVE_VIEW_SIZE=0 ;; large) LIVE_VIEW_SIZE=1 ;; medium) LIVE_VIEW_SIZE=2 ;; small) LIVE_VIEW_SIZE=3 ;; *) die "invalid live-view size" ;; esac
+        shift 2
+        ;;
+      --timeout)
+        [[ $# -ge 2 ]] || die "--timeout requires seconds"
+        AUTO_TIMEOUT="$2"
+        shift 2
+        ;;
       --video-nr)
         [[ $# -ge 2 ]] || die "--video-nr requires a value"
         VIDEO_NR="$2"
@@ -182,12 +234,17 @@ parse_args() {
     esac
   done
 
+  [[ "$PASSTHROUGH" =~ ^[01]$ ]] || die "invalid passthrough setting"
+  (( PASSTHROUGH == 0 || NATIVE_RESOLUTION == 1 )) || die "MJPEG passthrough requires native resolution"
+  [[ "$AUTO_FPS" =~ ^[01]$ && "$ON_DEMAND" =~ ^[01]$ && "$NATIVE_RESOLUTION" =~ ^[01]$ && "$LIVE_VIEW_SIZE" =~ ^[0-3]$ ]] || die "invalid automatic camera options"
+  [[ "$AUTO_TIMEOUT" =~ ^(0|[1-9][0-9]{0,7})$ ]] || die "--timeout must be 0 or a positive number of seconds (maximum 99999999)"
   [[ "$VIDEO_NR" =~ ^[0-9]+$ ]] || die "--video-nr must be a number"
   [[ "$WIDTH" =~ ^[0-9]+$ ]] || die "--width must be a number"
   [[ "$HEIGHT" =~ ^[0-9]+$ ]] || die "--height must be a number"
   [[ "$FPS" =~ ^[0-9]+$ ]] || die "--fps must be a number"
   [[ "$CAMERA_FPS" =~ ^[0-9]+$ ]] || die "--camera-fps must be a number"
   [[ "$LOOPBACK_BUFFERS" =~ ^[0-9]+$ ]] || die "--loopback-buffers must be a number"
+  (( WIDTH >= 16 && HEIGHT >= 16 && WIDTH % 2 == 0 && HEIGHT % 2 == 0 )) || die "video width and height must be even and at least 16"
   (( FPS >= 1 )) || die "--fps must be at least 1"
   (( CAMERA_FPS >= 1 )) || die "--camera-fps must be at least 1"
   (( LOOPBACK_BUFFERS >= 2 )) || die "--loopback-buffers must be at least 2"
@@ -304,6 +361,8 @@ install_packages() {
     v4l-utils
     desktop-file-utils
     libnotify-bin
+    python3-pyqt5
+    fonts-dejavu-core
     policykit-1
   )
 
@@ -319,6 +378,7 @@ install_packages() {
 
 install_binary() {
   local self
+  [[ "$INSTALL_PATH" != /usr/bin/camera-bridge ]] || { log "Use apt to update the Debian package"; return; }
   self="$(readlink -f "${BASH_SOURCE[0]}")"
 
   if [[ "$self" == "$INSTALL_PATH" ]]; then
@@ -328,6 +388,15 @@ install_binary() {
 
   log "Installing command to $INSTALL_PATH"
   run_privileged install -m 0755 "$self" "$INSTALL_PATH"
+  if [[ -f "$(dirname "$self")/canon-webcam-gui.py" ]]; then
+    run_privileged install -d /usr/share/canon-webcam
+    run_privileged install -m 0644 "$(dirname "$self")/canon-webcam-gui.py" "$GUI_PATH"
+    run_privileged install -m 0644 "$(dirname "$self")/canon-webcam-runtime.py" /usr/share/canon-webcam/canon-webcam-runtime.py
+    run_privileged install -m 0644 "$(dirname "$self")"/assets/status-*.png /usr/share/canon-webcam/
+    run_privileged install -m 0644 "$(dirname "$self")/assets/warning.svg" /usr/share/canon-webcam/warning.svg
+    run_privileged install -m 0644 "$(dirname "$self")/assets/tray-ready.svg" "$(dirname "$self")/assets/tray-live.svg" "$(dirname "$self")/assets/tray-live-dim.svg" "$(dirname "$self")/assets/tray-off.svg" "$(dirname "$self")"/assets/tray-{connected,awake,starting,warning}.svg /usr/share/canon-webcam/
+    run_privileged install -D -m 0644 "$(dirname "$self")/assets/canon-webcam.svg" /usr/share/icons/hicolor/scalable/apps/camera-bridge.svg
+  fi
 }
 
 write_root_file() {
@@ -376,7 +445,9 @@ configure_loopback_runtime_controls() {
   [[ -c "$DEVICE" ]] || return
   command -v v4l2-ctl >/dev/null 2>&1 || return
 
+  v4l2-ctl --device "$DEVICE" --set-ctrl keep_format=0 >/dev/null 2>&1 || true
   v4l2-ctl --device "$DEVICE" --set-ctrl sustain_framerate=1 >/dev/null 2>&1 || true
+  v4l2-ctl --device "$DEVICE" --set-parm="$FPS" >/dev/null 2>&1 || true
 }
 
 wait_for_video_device() {
@@ -440,7 +511,7 @@ reset_loopback() {
   if loopback_loaded; then
     log "Unloading v4l2loopback"
     if ! run_privileged modprobe -r v4l2loopback; then
-      die "could not unload v4l2loopback. Close apps using virtual cameras, then rerun: canon-webcam reset-loopback"
+      die "could not unload v4l2loopback. Close apps using virtual cameras, then rerun: camera-bridge reset-loopback"
     fi
   fi
 
@@ -456,7 +527,7 @@ reset_loopback() {
 
   if ! loopback_writer_ready; then
     warn "$(loopback_info)"
-    die "$DEVICE is present but is not advertising Video Output. Reboot, then run: canon-webcam start"
+    die "$DEVICE is present but is not advertising Video Output. Reboot, then run: camera-bridge start"
   fi
 
   log "$DEVICE is ready for ffmpeg input"
@@ -503,14 +574,11 @@ enable_user_linger() {
 }
 
 install_user_service() {
-  local service_dir service_file tmp viewfinder_arg
+  [[ "${CANON_WEBCAM_PREVIEW:-0}" != 1 ]] || die "preview setup is managed by tools/preview.sh"
+  local service_dir service_file tmp
 
   service_dir="$HOME/.config/systemd/user"
   service_file="$service_dir/$SERVICE_NAME"
-  viewfinder_arg=""
-  if [[ "$SET_VIEWFINDER" -eq 1 ]]; then
-    viewfinder_arg=" --set-viewfinder"
-  fi
   mkdir -p "$service_dir"
 
   tmp="$(mktemp)"
@@ -520,6 +588,8 @@ Description=Canon camera virtual webcam
 
 [Service]
 Type=simple
+KillMode=mixed
+TimeoutStopSec=20
 Environment=CANON_WEBCAM_IN_SERVICE=1
 Environment=CANON_WEBCAM_CAMERA_RETRY_DELAY=${CAMERA_RETRY_DELAY}
 Environment=CANON_WEBCAM_CAMERA_FAILURE_DELAY=${CAMERA_FAILURE_DELAY}
@@ -529,8 +599,20 @@ Environment=CANON_WEBCAM_CAMERA_STABLE_CHECKS=${CAMERA_STABLE_CHECKS}
 Environment=CANON_WEBCAM_CAMERA_SEGMENT_SECONDS=${CAMERA_SEGMENT_SECONDS}
 Environment=CANON_WEBCAM_CAMERA_FPS=${CAMERA_FPS}
 Environment=CANON_WEBCAM_SET_VIEWFINDER=${SET_VIEWFINDER}
-ExecStart=${INSTALL_PATH} stream --device ${DEVICE} --label ${CARD_LABEL} --width ${WIDTH} --height ${HEIGHT} --fps ${FPS} --camera-fps ${CAMERA_FPS} --loopback-buffers ${LOOPBACK_BUFFERS}${viewfinder_arg}
-Restart=always
+Environment=CANON_WEBCAM_DEVICE=${DEVICE}
+Environment=CANON_WEBCAM_LABEL=${CARD_LABEL}
+Environment=CANON_WEBCAM_WIDTH=${WIDTH}
+Environment=CANON_WEBCAM_HEIGHT=${HEIGHT}
+Environment=CANON_WEBCAM_FPS=${FPS}
+Environment=CANON_WEBCAM_LOOPBACK_BUFFERS=${LOOPBACK_BUFFERS}
+Environment=CANON_WEBCAM_AUTO_TIMEOUT=${AUTO_TIMEOUT}
+Environment=CANON_WEBCAM_ON_DEMAND=${ON_DEMAND}
+Environment=CANON_WEBCAM_AUTO_FPS=${AUTO_FPS}
+Environment=CANON_WEBCAM_PASSTHROUGH=${PASSTHROUGH}
+Environment=CANON_WEBCAM_NATIVE_RESOLUTION=${NATIVE_RESOLUTION}
+Environment=CANON_WEBCAM_LIVE_VIEW_SIZE=${LIVE_VIEW_SIZE}
+ExecStart=${INSTALL_PATH} stream
+Restart=on-failure
 RestartSec=3
 
 [Install]
@@ -615,25 +697,27 @@ install_desktop_launchers() {
 
   write_desktop_launcher \
     "canon-webcam-start.desktop" \
-    "Start Canon Webcam" \
+    "Start Camera Bridge" \
     "Start the Canon camera virtual webcam service" \
     "launcher-start" \
     "camera-web"
 
   write_desktop_launcher \
     "canon-webcam-stop.desktop" \
-    "Stop Canon Webcam" \
+    "Stop Camera Bridge" \
     "Stop the Canon camera virtual webcam service" \
     "launcher-stop" \
     "media-playback-stop"
 
   write_desktop_launcher \
     "canon-webcam-status.desktop" \
-    "Canon Webcam Status" \
+    "Camera Bridge Status" \
     "Show whether the Canon camera virtual webcam service is running" \
     "launcher-status" \
     "dialog-information"
 
+  write_desktop_launcher "canon-webcam.desktop" "Camera Bridge" "Webcam settings and status" "settings" "camera-bridge"
+  write_desktop_launcher "canon-webcam-tray.desktop" "Camera Bridge Tray" "Webcam tray controls" "tray" "camera-bridge"
   refresh_desktop_launchers
   log "Installed application launchers in $(desktop_app_dir)"
 }
@@ -645,13 +729,16 @@ remove_desktop_launchers() {
   rm -f \
     "$app_dir/canon-webcam-start.desktop" \
     "$app_dir/canon-webcam-stop.desktop" \
-    "$app_dir/canon-webcam-status.desktop"
+    "$app_dir/canon-webcam-status.desktop" \
+    "$app_dir/canon-webcam.desktop" \
+    "$app_dir/canon-webcam-tray.desktop"
 
   refresh_desktop_launchers
   log "Removed application launchers from $app_dir"
 }
 
 install_all() {
+  [[ "$INSTALL_PATH" != /usr/bin/camera-bridge ]] || die "use apt to update the installed Debian package"
   require_not_root
   warn_if_not_ubuntu_2404
   need_cmd sudo
@@ -680,8 +767,8 @@ install_all() {
     service_start
   fi
 
-  log "Install complete. Connect the camera by USB, set it to movie/live-view capable mode, then run: canon-webcam doctor"
-  log "Kubuntu launchers are available as Start Canon Webcam, Stop Canon Webcam, and Canon Webcam Status."
+  log "Install complete. Connect the camera by USB, set it to movie/live-view capable mode, then run: camera-bridge doctor"
+  log "Kubuntu launchers are available as Start Camera Bridge, Stop Camera Bridge, and Camera Bridge Status."
 }
 
 stop_camera_mount_helpers() {
@@ -726,39 +813,134 @@ camera_wait_stable() {
   for (( attempt = 1; attempt <= CAMERA_STABLE_CHECKS; attempt++ )); do
     current="$(camera_detect_line)"
     if [[ -z "$current" ]]; then
+      CAMERA_READY=0
       return 1
     fi
 
     if [[ -n "$previous" && "$current" != "$previous" ]]; then
+      CAMERA_READY=0
       return 1
     fi
 
+    # A previously stable, unchanged USB camera does not need another delayed
+    # stability sample on every app open. New connections still settle normally.
+    if (( CAMERA_READY == 1 )) && [[ "$current" == "$LAST_CAMERA_ID" ]]; then break; fi
     previous="$current"
     if (( attempt < CAMERA_STABLE_CHECKS )); then
       sleep 1
     fi
   done
 
-  if (( CAMERA_SETTLE_DELAY > 0 )); then
+  if (( CAMERA_READY == 0 && CAMERA_SETTLE_DELAY > 0 )); then
     log "Camera detected; waiting ${CAMERA_SETTLE_DELAY}s for USB/PTP to settle"
     sleep "$CAMERA_SETTLE_DELAY"
   fi
+  CAMERA_READY=1
+  LAST_CAMERA_ID="$current"
 }
 
 camera_set_config() {
   local config="$1"
 
-  timeout 5 gphoto2 --set-config "$config" >/dev/null 2>&1 || true
+  timeout --kill-after=1 5 gphoto2 --set-config "$config" >/dev/null 2>&1 || true
+}
+
+write_live_view_state() {
+  [[ "${CANON_WEBCAM_IN_SERVICE:-0}" == 1 && -n "${XDG_RUNTIME_DIR:-}" ]] || return 0
+  local target="$XDG_RUNTIME_DIR/canon-webcam/live-view"
+  mkdir -p "$(dirname "$target")"
+  printf '%s\n%s\n' "$1" "$LAST_CAMERA_ID" >"$target.tmp.$$"
+  mv -f "$target.tmp.$$" "$target"
 }
 
 camera_prepare_live_view() {
+  CAMERA_RESPONSIVE=1
+  write_live_view_state unknown
   if [[ "$SET_VIEWFINDER" -ne 1 ]]; then
     return
   fi
 
   log "Preparing Canon EOS live view"
-  camera_set_config capturetarget=0
-  camera_set_config eosviewfinder=1
+  local configs=(--set-config capturetarget=0)
+  case "$LIVE_VIEW_SIZE" in
+    1) configs+=(--set-config liveviewsize=Large) ;;
+    2) configs+=(--set-config liveviewsize=Medium) ;;
+    3) configs+=(--set-config liveviewsize=Small) ;;
+  esac
+  configs+=(--set-config viewfinder=1)
+  if ! timeout --kill-after=1 8 gphoto2 "${configs[@]}" >/dev/null 2>&1; then
+    # Models without a size control still get the basic EOS live-view setup.
+    if ! timeout --kill-after=1 5 gphoto2 --set-config capturetarget=0 --set-config viewfinder=1 >/dev/null 2>&1; then
+      CAMERA_RESPONSIVE=0
+      warn "Camera is detected but not responding. Turn it off and on; reconnect USB if needed."
+      return 0
+    fi
+  fi
+  LIVE_VIEW_ACTIVE=1
+  write_live_view_state on
+}
+
+camera_end_live_view() {
+  if (( SET_VIEWFINDER == 1 && LIVE_VIEW_ACTIVE == 1 )); then
+    log "Leaving Canon EOS live view"
+    if timeout --kill-after=1 5 gphoto2 --set-config viewfinder=0 >/dev/null 2>&1; then
+      write_live_view_state off
+    else
+      write_live_view_state unknown
+    fi
+    LIVE_VIEW_ACTIVE=0
+  fi
+  END_LIVE_VIEW=0
+}
+
+resolve_native_resolution() {
+  (( NATIVE_RESOLUTION == 1 )) || return 0
+  local cache="${XDG_CONFIG_HOME:-$HOME/.config}/canon-webcam/native-size.json"
+  local cached="" measured="" dimensions=""
+  if [[ -r "$cache" ]]; then
+    cached="$(/usr/bin/python3 -c 'import json,sys
+try:
+ d=json.load(open(sys.argv[1])); w,h=d["width"],d["height"]
+ if d.get("live_view_size")==int(sys.argv[2]) and 16<=w<=16384 and 16<=h<=16384 and not(w%2 or h%2): print(w,h)
+except (OSError,ValueError,KeyError,TypeError): pass' "$cache" "$LIVE_VIEW_SIZE")"
+  fi
+  if [[ "$cached" =~ ^([0-9]+)[[:space:]]([0-9]+)$ ]]; then
+    WIDTH="${BASH_REMATCH[1]}"; HEIGHT="${BASH_REMATCH[2]}"
+    log "Using last detected native size ${WIDTH}x${HEIGHT}"
+    if [[ "${CANON_WEBCAM_IN_SERVICE:-0}" == 1 && -n "${XDG_RUNTIME_DIR:-}" ]]; then
+      mkdir -p "$XDG_RUNTIME_DIR/canon-webcam"
+      /usr/bin/python3 - "$cache" "$XDG_RUNTIME_DIR/canon-webcam/camera.json" <<'CACHED'
+from pathlib import Path
+import json,sys
+value=json.loads(Path(sys.argv[1]).read_text()); value['cached']=True
+Path(sys.argv[2]).write_text(json.dumps(value))
+CACHED
+    fi
+    return 0
+  fi
+  if ! timeout --kill-after=1 3 gphoto2 --auto-detect | awk 'NR > 2 && NF { found = 1 } END { exit !found }'; then
+    log "Waiting for a camera before detecting native size"
+    return 0
+  fi
+  stop_camera_mount_helpers
+  camera_prepare_live_view
+  if (( CAMERA_RESPONSIVE == 1 )); then
+    measured="$(/usr/bin/python3 "$(runtime_helper_path)" probe)"
+    dimensions="$(printf '%s' "$measured" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["width"], d["height"]) if d.get("width") else None')"
+    if [[ "$dimensions" =~ ^([0-9]+)[[:space:]]([0-9]+)$ ]]; then
+      WIDTH="${BASH_REMATCH[1]}"; HEIGHT="${BASH_REMATCH[2]}"
+      CAMERA_READY=1
+      mkdir -p "$(dirname "$cache")"
+      printf '%s' "$measured" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); d["live_view_size"]=int(sys.argv[1]); d["cached"]=False; print(json.dumps(d))' "$LIVE_VIEW_SIZE" >"$cache.tmp"
+      mv "$cache.tmp" "$cache"
+      if [[ "${CANON_WEBCAM_IN_SERVICE:-0}" == 1 && -n "${XDG_RUNTIME_DIR:-}" ]]; then
+        mkdir -p "$XDG_RUNTIME_DIR/canon-webcam"
+        cp "$cache" "$XDG_RUNTIME_DIR/canon-webcam/camera.json"
+      fi
+      log "Detected native live-view size ${WIDTH}x${HEIGHT}"
+    fi
+  fi
+  if (( ON_DEMAND == 1 )); then camera_end_live_view; fi
 }
 
 terminate_process() {
@@ -766,7 +948,11 @@ terminate_process() {
 
   [[ -n "$pid" ]] || return
   kill "$pid" >/dev/null 2>&1 || true
-  sleep 0.5
+  local check
+  for (( check=0; check<40; check++ )); do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then break; fi
+    sleep 0.1
+  done
   kill -KILL "$pid" >/dev/null 2>&1 || true
   wait "$pid" >/dev/null 2>&1 || true
 }
@@ -815,22 +1001,51 @@ run_test_source_ffmpeg() {
 }
 
 run_test_source_feeder_ffmpeg() {
+  local message="${1:-Waiting for a video app}"
+  local title_size=$(( WIDTH / 44 )) message_size=$(( WIDTH / 28 )) detail_size=$(( WIDTH / 48 ))
+  local detail="Select Camera-Bridge in your video app to begin." icon=idle frames=3 rate="$FPS"
+  local pacing=() animation="" icon_size=$(( HEIGHT / 5 ))
+  local asset_dir="${CANON_WEBCAM_ASSET_DIR:-}"
+  [[ -n "$asset_dir" ]] || asset_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/assets"
+  [[ -f "$asset_dir/status-idle.png" ]] || asset_dir=/usr/share/canon-webcam
+  case "$message" in
+    "Getting video ready...") detail="Checking the camera connection..." ;;
+    "Camera not responding") icon=warning; detail="Try video mode or turn camera off and on. Check USB." ;;
+    "Camera disconnected") icon=disconnected; detail="Check the USB connection and camera power." ;;
+    "Lost connection") icon=disconnected; detail="Check the connection or restart the camera." ;;
+    "Starting camera...")
+      icon=starting; detail="Preparing live view..."
+      # A bounded two-second pulse, interrupted as soon as capture takes over.
+      # Resting and failure cards remain still, including quiet recovery attempts.
+      frames=12; rate=6; pacing=(-re)
+      animation=",drawbox=x=iw/2-4:y=ih*0.77:w=8:h=8:color=0xa8c6b5:t=fill:enable='lt(mod(n,6),3)'"
+      ;;
+  esac
+  (( detail_size >= 12 )) || detail_size=12
+  (( title_size >= 14 )) || title_size=14
+  (( message_size >= 16 )) || message_size=16
+  # Symmetric symbols remain recognizable in mirrored local previews. Text is
+  # intentionally normal: video apps usually mirror only the user's own preview.
+  # After a bounded update, the kernel repeats the final image without encoding.
   ffmpeg \
-    -hide_banner \
-    -y \
-    -loglevel error \
-    -nostdin \
-    -re \
-    -f lavfi \
-    -i "testsrc2=size=${WIDTH}x${HEIGHT}:rate=${CAMERA_FPS}" \
-    -vf format=yuvj420p \
-    -vcodec mjpeg \
-    -q:v 5 \
-    -f image2pipe \
-    "$CAMERA_FIFO"
+    -hide_banner -y -loglevel error -nostdin \
+    "${pacing[@]}" -f lavfi -i "color=c=0x161b22:size=${WIDTH}x${HEIGHT}:rate=${rate}" \
+    -loop 1 -i "$asset_dir/status-${icon}.png" \
+    -filter_complex_threads 1 \
+    -filter_complex "[1:v]scale=${icon_size}:${icon_size}[icon];[0:v][icon]overlay=(W-w)/2:H*0.20,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='Camera Bridge':fontcolor=0x9ca9bb:fontsize=${title_size}:x=(w-text_w)/2:y=h*0.45,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='${message}':fontcolor=white:fontsize=${message_size}:x=(w-text_w)/2:y=h*0.53,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='${detail}':fontcolor=0x9ca9bb:fontsize=${detail_size}:x=(w-text_w)/2:y=h*0.64${animation},format=yuvj420p" \
+    -frames:v "$frames" -threads 1 -vcodec mjpeg -q:v 3 -f image2pipe "$CAMERA_FIFO"
 }
 
 start_loopback_writer() {
+  local input_timing=(-framerate "$CAMERA_FPS")
+  local video_output=()
+  local output_timing=(-r "$FPS")
+  if (( AUTO_FPS == 1 )); then
+    # Wallclock timing preserves variable camera arrival intervals.
+    # Passthrough avoids creating catch-up frames after standby gaps.
+    input_timing=(-use_wallclock_as_timestamps 1 -framerate "$FPS")
+    output_timing=(-fps_mode passthrough -enc_time_base 1/1000000)
+  fi
   if [[ -n "${LOOPBACK_WRITER_PID:-}" ]] && kill -0 "$LOOPBACK_WRITER_PID" >/dev/null 2>&1; then
     return
   fi
@@ -843,6 +1058,11 @@ start_loopback_writer() {
 
   exec {CAMERA_FIFO_HOLD_FD}<>"$CAMERA_FIFO"
 
+  video_output=(-filter_threads 1 -vf "scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p" "${output_timing[@]}" -threads 1 -flush_packets 1 -vcodec rawvideo -pix_fmt yuv420p)
+  if (( PASSTHROUGH == 1 )); then
+    video_output=(-c:v copy -flush_packets 1)
+  fi
+
   log "Starting persistent ffmpeg writer for $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps output"
   ffmpeg \
     -hide_banner \
@@ -850,20 +1070,16 @@ start_loopback_writer() {
     -nostdin \
     -fflags nobuffer \
     -flags low_delay \
-    -avioflags direct \
     -probesize 32 \
     -analyzeduration 0 \
     -fpsprobesize 0 \
-    -f image2pipe \
+    -f mjpeg \
     -vcodec mjpeg \
-    -framerate "$CAMERA_FPS" \
+    "${input_timing[@]}" \
+    -threads 1 \
     -thread_queue_size 1 \
     -i "$CAMERA_FIFO" \
-    -filter_threads 1 \
-    -vf "scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p" \
-    -r "$FPS" \
-    -vcodec rawvideo \
-    -pix_fmt yuv420p \
+    "${video_output[@]}" \
     -f v4l2 \
     "$DEVICE" &
   LOOPBACK_WRITER_PID="$!"
@@ -876,29 +1092,24 @@ start_loopback_writer() {
 }
 
 start_background_test_source() {
+  local message="${1:-Waiting for a video app}"
   start_loopback_writer
-
-  if [[ -n "${TEST_SOURCE_PID:-}" ]] && kill -0 "$TEST_SOURCE_PID" >/dev/null 2>&1; then
-    return
-  fi
-
+  if [[ "$LAST_STATUS_FRAME" == "$message" ]]; then return 0; fi
   stop_background_test_source
-  log "Keeping $DEVICE visible with a generated test pattern at ${WIDTH}x${HEIGHT}/${FPS}fps"
-  run_test_source_feeder_ffmpeg &
+  LAST_STATUS_FRAME="$message"
+  write_stream_state "$message"
+  log "Showing status card: $message"
+  run_test_source_feeder_ffmpeg "$message" &
   TEST_SOURCE_PID="$!"
 }
 
 stop_background_test_source() {
   if [[ -n "${TEST_SOURCE_PID:-}" ]]; then
-    terminate_process "$TEST_SOURCE_PID"
+    if kill -0 "$TEST_SOURCE_PID" >/dev/null 2>&1; then terminate_process "$TEST_SOURCE_PID"; fi
+    wait "$TEST_SOURCE_PID" >/dev/null 2>&1 || true
     TEST_SOURCE_PID=""
   fi
-
-  stop_orphaned_test_source_feeders
-
-  if [[ -n "${CAMERA_FIFO:-}" ]] && command -v pkill >/dev/null 2>&1; then
-    pkill -TERM -f "ffmpeg .*testsrc2=size=${WIDTH}x${HEIGHT}:rate=${CAMERA_FPS}.* ${CAMERA_FIFO}" >/dev/null 2>&1 || true
-  fi
+  LAST_STATUS_FRAME=""
 }
 
 stream_test_source() {
@@ -941,64 +1152,185 @@ stop_camera_stream_processes() {
   fi
 }
 
+runtime_helper_path() {
+  local adjacent
+  adjacent="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/canon-webcam-runtime.py"
+  if [[ -f "$adjacent" ]]; then
+    printf '%s\n' "$adjacent"
+  else
+    printf '%s\n' /usr/share/canon-webcam/canon-webcam-runtime.py
+  fi
+}
+
+pause_encoding() {
+  CAMERA_IDLE=1
+  if [[ -n "${CAMERA_GPHOTO_PID:-}" ]]; then
+    terminate_process "$CAMERA_GPHOTO_PID"
+  fi
+}
+
+wait_for_camera_retry() {
+  # Bash defers traps while waiting for a foreground sleep. Waiting on a child
+  # instead lets an app-open/app-close signal interrupt this retry immediately.
+  local delay_pid
+  sleep "$CAMERA_RETRY_DELAY" &
+  delay_pid=$!
+  wait "$delay_pid" || true
+  kill "$delay_pid" >/dev/null 2>&1 || true
+  wait "$delay_pid" 2>/dev/null || true
+}
+
+standby_encoding() {
+  local saw_absent=0 wants=1 current=""
+  local retry_at=$(( SECONDS + CAMERA_FAILURE_DELAY ))
+  # Give the persistent writer a fallback image, then stop generating frames.
+  # sustain_framerate repeats that image in the kernel while ffmpeg waits on FIFO.
+  local card="Waiting for a video app"
+  if (( ON_DEMAND == 1 )); then wants=0; fi
+  if [[ -r "${CANON_WEBCAM_DEMAND_FILE:-}" ]]; then
+    read -r wants <"$CANON_WEBCAM_DEMAND_FILE" || true
+  fi
+  if (( CAMERA_RECOVERY_WAIT == 1 )) || [[ "$wants" == 1 ]]; then
+    if timeout --kill-after=1 3 gphoto2 --auto-detect | awk 'NR > 2 && NF { found = 1 } END { exit !found }'; then
+      card="Camera not responding"
+    else
+      card="Camera disconnected"
+    fi
+  fi
+  start_background_test_source "$card"
+  if [[ -n "$TEST_SOURCE_PID" ]]; then wait "$TEST_SOURCE_PID" || true; fi
+  stop_background_test_source
+  write_stream_state "Standby: $card. Virtual webcam ready."
+  log "Video paused; virtual webcam remains available. Waiting for an app."
+  while (( CAMERA_IDLE == 1 )); do
+    if (( END_LIVE_VIEW == 1 )); then camera_end_live_view; fi
+    wants=1
+    if (( ON_DEMAND == 1 )); then
+      wants=0
+      if [[ -r "${CANON_WEBCAM_DEMAND_FILE:-}" ]]; then read -r wants <"$CANON_WEBCAM_DEMAND_FILE" || true; fi
+    fi
+    if [[ "$wants" == 1 ]]; then
+      current="$(timeout --kill-after=1 3 gphoto2 --auto-detect | awk 'NR > 2 && NF { print; exit }')" || current=""
+      if [[ -z "$current" ]]; then
+        saw_absent=1
+      elif (( saw_absent == 1 )) || [[ -n "$LAST_CAMERA_ID" && "$current" != "$LAST_CAMERA_ID" ]] || (( CAMERA_RECOVERY_WAIT == 1 && SECONDS >= retry_at )); then
+        CAMERA_IDLE=0
+        log "Retrying camera connection in the background"
+        if [[ -n "${CANON_WEBCAM_ACTIVITY_FILE:-}" ]]; then
+          /usr/bin/python3 -c 'import sys,time; from pathlib import Path; Path(sys.argv[1]).write_text(str(time.monotonic()))' "$CANON_WEBCAM_ACTIVITY_FILE"
+        fi
+      fi
+    fi
+    if (( CAMERA_IDLE == 1 )); then wait_for_camera_retry; fi
+  done
+}
+
 run_camera_stream_once() {
+  (( CAMERA_IDLE == 0 )) || return 0
   local status
+  local capture=(gphoto2 --stdout --capture-movie)
 
   start_loopback_writer
 
-  if (( CAMERA_SEGMENT_SECONDS == 0 )); then
-    gphoto2 --stdout --capture-movie >"$CAMERA_FIFO" &
+  if (( CAMERA_SEGMENT_SECONDS > 0 )); then
+    capture=(gphoto2 --stdout "--capture-movie=${CAMERA_SEGMENT_SECONDS}s")
+  fi
+  if [[ -n "${CANON_WEBCAM_ACTIVITY_FILE:-}" ]]; then
+    CANON_WEBCAM_LIVE_VIEW_SIZE="$LIVE_VIEW_SIZE" /usr/bin/python3 "$(runtime_helper_path)" relay "$CAMERA_FIFO" "${capture[@]}" &
   else
-    gphoto2 --stdout "--capture-movie=${CAMERA_SEGMENT_SECONDS}s" >"$CAMERA_FIFO" &
+    "${capture[@]}" >"$CAMERA_FIFO" &
   fi
   CAMERA_GPHOTO_PID="$!"
+  if (( CAMERA_IDLE == 1 )); then terminate_process "$CAMERA_GPHOTO_PID"; fi
+  if (( CAMERA_RECOVERY_WAIT == 0 )); then write_stream_state "Capturing Canon live view"; fi
 
-  if wait "$CAMERA_GPHOTO_PID"; then
-    status=0
-  else
-    status="$?"
+  # Control signals can interrupt Bash wait before the capture process exits.
+  # Keep tracking that process until it really exits; otherwise it can retain USB.
+  while true; do
+    if wait "$CAMERA_GPHOTO_PID"; then status=0; else status="$?"; fi
+    if ! kill -0 "$CAMERA_GPHOTO_PID" >/dev/null 2>&1; then break; fi
+  done
+
+  if [[ -r "${CANON_WEBCAM_FRAME_STATS:-}" ]]; then
+    if /usr/bin/python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("frames",0)>0 else 1)' "$CANON_WEBCAM_FRAME_STATS"; then
+      CAMERA_RECOVERY_WAIT=0
+    fi
   fi
-
   CAMERA_GPHOTO_PID=""
   return "$status"
 }
 
+write_stream_state() {
+  [[ "${CANON_WEBCAM_IN_SERVICE:-0}" == 1 && -n "${XDG_RUNTIME_DIR:-}" ]] || return 0
+  mkdir -p "$XDG_RUNTIME_DIR/canon-webcam"
+  printf '%s\n' "$1" >"$XDG_RUNTIME_DIR/canon-webcam/status"
+}
+
 cleanup_stream() {
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM USR1 USR2 ALRM HUP
   stop_camera_stream_processes
+  camera_end_live_view
+  write_stream_state "Stopped"
 }
 
 stream_camera() {
   local backoff_delay="$CAMERA_FAILURE_DELAY"
   local normal_segment_min retry_after started_at status stream_duration
 
-  need_cmd gphoto2
-  need_cmd ffmpeg
-
-  [[ -c "$DEVICE" ]] || die "$DEVICE does not exist. Run 'canon-webcam install' and reboot if the loopback module was just built."
-  ensure_loopback_for_writer
-
   trap cleanup_stream EXIT
   trap 'cleanup_stream; exit 0' INT TERM
+  trap pause_encoding USR1
+  trap 'CAMERA_IDLE=0; CAMERA_RECOVERY_WAIT=0' HUP
+  trap 'CAMERA_IDLE=0; CAMERA_RECOVERY_WAIT=0' USR2
+  trap 'END_LIVE_VIEW=1' ALRM
+
+  need_cmd gphoto2
+  need_cmd ffmpeg
+  write_live_view_state unknown
+  write_stream_state "Getting webcam ready"
+
+  [[ -c "$DEVICE" ]] || die "$DEVICE does not exist. Run 'camera-bridge install' and reboot if the loopback module was just built."
+  ensure_loopback_for_writer
+  resolve_native_resolution
 
   log "Select '${CARD_LABEL}' or '$DEVICE' in your video app. Press Ctrl+C to stop foreground streaming."
-  start_background_test_source
+  start_background_test_source "Waiting for a video app"
+  sleep 0.5
+  kill -0 "$LOOPBACK_WRITER_PID" >/dev/null 2>&1 || die "virtual webcam writer failed after its first frame; check logs"
+  v4l2-ctl --device "$DEVICE" --set-ctrl keep_format=1 >/dev/null 2>&1 || true
+  if [[ -n "${CANON_WEBCAM_CONTROL_READY:-}" ]]; then touch "$CANON_WEBCAM_CONTROL_READY"; fi
 
   while true; do
+    if (( CAMERA_IDLE == 1 )); then
+      standby_encoding
+    fi
+    if (( CAMERA_IDLE == 0 && CAMERA_RECOVERY_WAIT == 0 )); then
+      start_background_test_source "Getting video ready..."
+    fi
     stop_camera_mount_helpers
 
     if ! camera_wait_stable; then
       warn "no stable gphoto2-compatible camera detected; retrying in ${CAMERA_RETRY_DELAY}s"
-      start_background_test_source
-      sleep "$CAMERA_RETRY_DELAY"
+      start_background_test_source "Camera disconnected"
+      wait_for_camera_retry
       continue
     fi
 
+    (( CAMERA_IDLE == 0 )) || continue
+    if (( CAMERA_RECOVERY_WAIT == 0 )); then start_background_test_source "Starting camera..."; fi
     stop_camera_mount_helpers
     camera_prepare_live_view
+    if (( CAMERA_RESPONSIVE == 0 )); then
+      CAMERA_RECOVERY_WAIT=1
+      CAMERA_IDLE=1
+      start_background_test_source "Camera not responding"
+      continue
+    fi
     stop_camera_mount_helpers
 
+    (( CAMERA_IDLE == 0 )) || continue
     stop_background_test_source
+    (( CAMERA_IDLE == 0 )) || continue
 
     if (( CAMERA_SEGMENT_SECONDS == 0 )); then
       log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${CAMERA_FPS}fps camera input, ${FPS}fps webcam output"
@@ -1017,7 +1349,7 @@ stream_camera() {
         normal_segment_min=$(( CAMERA_SEGMENT_SECONDS - 1 ))
       fi
 
-      while true; do
+      while (( CAMERA_IDLE == 0 )); do
         log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${CAMERA_FPS}fps camera input, ${FPS}fps webcam output"
         started_at="$(date +%s)"
 
@@ -1038,6 +1370,8 @@ stream_camera() {
       done
     fi
 
+    (( CAMERA_IDLE == 0 )) || continue
+
     if (( stream_duration >= 60 )); then
       backoff_delay="$CAMERA_FAILURE_DELAY"
     fi
@@ -1056,16 +1390,27 @@ stream_camera() {
       fi
     fi
 
-    start_background_test_source
-    sleep "$retry_after"
+    if timeout --kill-after=1 3 gphoto2 --auto-detect | awk 'NR > 2 && NF { found = 1 } END { exit !found }'; then
+      start_background_test_source "Camera not responding"
+    else
+      start_background_test_source "Camera disconnected"
+    fi
+    CAMERA_RECOVERY_WAIT=1
+    CAMERA_IDLE=1
+    log "Recovery active; retrying while an app needs the camera without changing the visible warning"
   done
 }
 
 service_start() {
-  ensure_runtime_installed_current
+  if [[ "${CANON_WEBCAM_PREVIEW:-0}" != 1 ]]; then ensure_runtime_installed_current; fi
 
   if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
-    log "$SERVICE_NAME is already running"
+    if (( ON_DEMAND == 0 )); then
+      log "Resuming encoding on the existing virtual webcam"
+      systemctl_user kill --kill-whom=main --signal=SIGUSR2 "$SERVICE_NAME"
+    else
+      log "Automatic webcam is enabled; open it in an app to start capture"
+    fi
     return 0
   fi
 
@@ -1081,6 +1426,10 @@ service_stop() {
 }
 
 service_restart() {
+  if [[ "${CANON_WEBCAM_PREVIEW:-0}" == 1 ]]; then
+    systemctl_user restart "$SERVICE_NAME"
+    return
+  fi
   service_stop >/dev/null 2>&1 || true
   service_start
 }
@@ -1108,18 +1457,18 @@ service_logs() {
 
 launcher_start() {
   if service_start; then
-    notify_desktop "Canon Webcam" "Started. Select ${CARD_LABEL} in your video app."
+    notify_desktop "Camera Bridge" "Started/resumed. Select ${CARD_LABEL}. Apps opened before the webcam started may need restarting."
   else
-    notify_desktop "Canon Webcam" "Start failed. Run canon-webcam logs for details."
+    notify_desktop "Camera Bridge" "Start failed. Run camera-bridge logs for details."
     return 1
   fi
 }
 
 launcher_stop() {
   if service_stop; then
-    notify_desktop "Canon Webcam" "Stopped."
+    notify_desktop "Camera Bridge" "Stopped."
   else
-    notify_desktop "Canon Webcam" "Stop failed. Run canon-webcam status for details."
+    notify_desktop "Camera Bridge" "Stop failed. Run camera-bridge status for details."
     return 1
   fi
 }
@@ -1128,11 +1477,11 @@ launcher_status() {
   local service_file="$HOME/.config/systemd/user/$SERVICE_NAME"
 
   if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
-    notify_desktop "Canon Webcam" "Running. Select ${CARD_LABEL} in your video app."
+    notify_desktop "Camera Bridge" "Running. Select ${CARD_LABEL} in your video app."
   elif [[ -f "$service_file" ]]; then
-    notify_desktop "Canon Webcam" "Stopped."
+    notify_desktop "Camera Bridge" "Stopped."
   else
-    notify_desktop "Canon Webcam" "Not installed. Run canon-webcam install first."
+    notify_desktop "Camera Bridge" "Not installed. Run camera-bridge install first."
     return 1
   fi
 }
@@ -1200,7 +1549,7 @@ doctor() {
     elif loopback_writer_ready; then
       printf '  ok: %s is ready for ffmpeg input\n' "$DEVICE"
     else
-      printf '  missing: %s is not writable by ffmpeg; run canon-webcam reset-loopback\n' "$DEVICE"
+      printf '  missing: %s is not writable by ffmpeg; run camera-bridge reset-loopback\n' "$DEVICE"
       problems=1
     fi
   fi
@@ -1218,12 +1567,12 @@ doctor() {
   if command -v gphoto2 >/dev/null 2>&1; then
     if [[ "$service_active" -eq 1 ]]; then
       printf '  skipped: %s is active and may own the camera PTP session\n' "$SERVICE_NAME"
-      printf '  hint: run canon-webcam logs to inspect live capture, or stop the service before direct gphoto2 checks\n'
+      printf '  hint: run camera-bridge logs to inspect live capture, or stop the service before direct gphoto2 checks\n'
     else
       gphoto2 --auto-detect || true
       if camera_detected; then
         printf '  ok: gphoto2 sees a camera\n'
-        if timeout 8 gphoto2 --summary >/dev/null 2>&1; then
+        if timeout --kill-after=1 8 gphoto2 --summary >/dev/null 2>&1; then
           printf '  ok: camera responds to PTP commands\n'
         else
           printf '  missing: camera is detected but not responding to PTP commands; power-cycle it and reconnect USB\n'
@@ -1254,15 +1603,27 @@ doctor() {
 uninstall_all() {
   require_not_root
   need_cmd sudo
+  [[ "$INSTALL_PATH" != /usr/bin/camera-bridge ]] || die "installed by Debian package; remove with sudo apt remove camera-bridge"
 
   systemctl_user stop "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl_user disable "$SERVICE_NAME" >/dev/null 2>&1 || true
   rm -f "$HOME/.config/systemd/user/$SERVICE_NAME"
   systemctl_user daemon-reload >/dev/null 2>&1 || true
   remove_desktop_launchers
+  rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/canon-webcam-tray.desktop"
 
   sudo rm -f \
     "$INSTALL_PATH" \
+    "$GUI_PATH" \
+    /usr/share/canon-webcam/canon-webcam-runtime.py \
+    /usr/share/canon-webcam/status-{idle,starting,warning,disconnected}.png \
+    /usr/share/canon-webcam/warning.svg \
+    /usr/share/canon-webcam/tray-ready.svg \
+    /usr/share/canon-webcam/tray-live.svg \
+    /usr/share/canon-webcam/tray-live-dim.svg \
+    /usr/share/canon-webcam/tray-off.svg \
+    /usr/share/canon-webcam/tray-{connected,awake,starting,warning}.svg \
+    /usr/share/icons/hicolor/scalable/apps/camera-bridge.svg \
     /etc/modules-load.d/canon-webcam.conf \
     /etc/modprobe.d/canon-webcam.conf
 
@@ -1275,14 +1636,56 @@ main() {
     shift
   fi
 
+  # Read data only: never execute settings as shell code.
+  local key value
+  local config="${XDG_CONFIG_HOME:-$HOME/.config}/canon-webcam/settings.conf"
+  if [[ -f "$config" && "$command" =~ ^(install|stream|setup-user|test-source)$ ]]; then
+    while IFS='=' read -r key value; do
+      case "$key" in
+        WIDTH|HEIGHT|FPS|CAMERA_FPS|AUTO_TIMEOUT|SET_VIEWFINDER|ON_DEMAND|NATIVE_RESOLUTION|LIVE_VIEW_SIZE|AUTO_FPS|PASSTHROUGH)
+          [[ "$value" =~ ^(0|[1-9][0-9]{0,7})$ ]] || die "invalid setting: $key"
+          printf -v "$key" '%s' "$value"
+          ;;
+      esac
+    done <"$config"
+  fi
   parse_args "$@"
 
   case "$command" in
     install)
       install_all
       ;;
+    tray|settings)
+      need_cmd python3
+      local gui="$GUI_PATH"
+      [[ -f "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/canon-webcam-gui.py" ]] && gui="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/canon-webcam-gui.py"
+      exec /usr/bin/python3 "$gui" "$command"
+      ;;
+    setup-user)
+      require_not_root
+      install_user_service
+      install_desktop_launchers
+      ;;
     stream)
+      if [[ "${CANON_WEBCAM_WATCHED:-0}" != 1 ]] && { (( ON_DEMAND == 1 || AUTO_TIMEOUT > 0 )) || [[ "${CANON_WEBCAM_IN_SERVICE:-0}" == 1 ]]; }; then
+        need_cmd python3
+        export CANON_WEBCAM_DEVICE="$DEVICE" CANON_WEBCAM_ON_DEMAND="$ON_DEMAND"
+        log "Automatic webcam controls active; virtual webcam stays open while idle"
+        exec /usr/bin/python3 "$(runtime_helper_path)" watch "$AUTO_TIMEOUT" "$(readlink -f "${BASH_SOURCE[0]}")" stream "$@"
+      fi
       stream_camera
+      ;;
+    retry)
+      service_start
+      systemctl_user kill --kill-whom=main --signal=SIGHUP "$SERVICE_NAME"
+      ;;
+    force-start)
+      service_start
+      systemctl_user kill --kill-whom=main --signal=SIGUSR2 "$SERVICE_NAME"
+      ;;
+    auto)
+      service_start
+      systemctl_user kill --kill-whom=main --signal=SIGCONT "$SERVICE_NAME"
       ;;
     start)
       service_start

@@ -1,246 +1,112 @@
-# Canon Webcam Linux
+# Camera Bridge
 
-Use a Canon camera as a persistent Linux virtual webcam on Kubuntu/Ubuntu 24.04.
+Use a compatible Canon camera as a Linux webcam, with automatic camera control
+and a simple KDE tray app. Targets Kubuntu/Ubuntu 24.04.
 
-`canon-webcam` creates a `v4l2loopback` device such as `/dev/video42`, feeds it
-from Canon USB live view through `gphoto2` and `ffmpeg`, and keeps the device
-visible with a generated test pattern whenever the camera is unavailable.
-Video apps see the camera as `Canon-Webcam`.
+Open your video app to start the camera. Close its camera preview to pause video
+processing; after **60 seconds** without use, the camera leaves live view.
+The virtual webcam stays available while the camera rests.
 
-## Requirements
+Camera Bridge is an independent project, not affiliated with or endorsed by Canon.
+Compatibility varies by model; hardware testing so far has used a **Canon EOS 7D Mark II**.
 
-- Kubuntu 24.04 or Ubuntu 24.04 with a graphical user session.
-- A Canon camera whose live view or movie capture works through `gphoto2`.
-- A USB data cable. Charge-only cables will not work.
-- Camera Wi-Fi disabled while using USB.
-- Camera mode set to live view, movie, PC remote, or PTP mode as required by
-  the camera body.
+## Install from APT
 
-For long calls, disable camera auto power-off and use AC power or a dummy
-battery.
-
-## Quick Start
-
-Run the installer as your normal desktop user:
+Add the [signed M45 Software repository](https://m45software.com/apt/) once:
 
 ```bash
-chmod +x ./canon-webcam.sh
-./canon-webcam.sh install --start
+sudo apt install curl ca-certificates
+curl -fLO https://m45software.com/apt/m45-software-archive-keyring_1.0_all.deb
+sudo apt install ./m45-software-archive-keyring_1.0_all.deb
+sudo apt update
+sudo apt install camera-bridge
 ```
 
-Connect and turn on the camera, then check the setup:
+[Signing-key fingerprint and setup-package checksum](docs/installation.md#add-the-repository-once).
+The repository targets Ubuntu 24.04 (amd64). Updates arrive through your normal
+system updates; quit and reopen the tray app after upgrading.
+
+APT installs the required dependencies, including the virtual webcam driver.
+Reboot if the webcam device is missing after installation. Secure Boot may require
+approving the driver signing key when prompted.
+
+### Install a .deb instead
+
+Download a package from [Releases](https://github.com/M45-Software/Camera-Bridge/releases),
+then install it from the download folder:
 
 ```bash
-canon-webcam doctor
+sudo apt install ./camera-bridge_0.2.0_all.deb
 ```
 
-Open Zoom, OBS, a browser, or another video app and select `Canon-Webcam` or
-`/dev/video42`.
+To build it yourself, see [development instructions](docs/development.md).
+If you used the older script installer, follow the
+[migration instructions](docs/installation.md#upgrading-from-the-script-installer) first.
 
-## Daily Use
+## Start using your camera
 
-The installer creates a systemd user service and three Plasma launcher entries:
+1. Connect the camera with a USB **data** cable and turn it on. Try **video/movie
+   mode**, and disable camera Wi-Fi if it prevents USB access.
+2. Open **Camera Bridge** from your application menu and click **Turn on**.
+3. Open OBS, Zoom, Discord, or another video app and select **Camera-Bridge**.
 
-- `Start Canon Webcam`
-- `Stop Canon Webcam`
-- `Canon Webcam Status`
+**If a video app was already open, close and reopen it to refresh its camera list.**
+Changing picture settings can also require reopening video apps; the settings
+window prompts you before reconnecting the webcam.
 
-Terminal commands:
+Native live-view resolution and automatic frame timing are enabled by default.
+The tested EOS 7D Mark II supplies a 1024 × 576 live-view image; other models may differ.
 
-```bash
-canon-webcam start
-canon-webcam status
-canon-webcam logs
-canon-webcam stop
-```
+## Controls and status
 
-## Use On Demand Without Autostart
+The tray menu and tooltip show whether the camera is connected, whether live view
+is on, and whether video is being sent to an app. A green activity dot blinks only
+while camera images are arriving.
 
-If you want to keep `canon-webcam` installed but avoid the background CPU use
-when you are not on calls, disable the autostarted user service:
+<img src="assets/screenshots/settings-dark.png" alt="Camera Bridge controls in dark mode" width="420">
+<img src="assets/screenshots/tray-menu-dark.png" alt="Tray menu showing camera connection, live view, and video activity" width="360">
 
-```bash
-systemctl --user disable --now canon-webcam.service
-```
+**Settings** contains automatic use, the rest delay, problem notifications, and
+login preferences. **Advanced** contains picture settings and connection details.
+Closing the controls window leaves the tray running. **Quit** stops the webcam
+and leaves camera live view before exiting.
 
-This keeps the command, virtual webcam config, and desktop launchers installed.
-Start the service manually when you need the camera:
+The video feed also explains when it is waiting, starting, or unable to connect.
+Large symbols remain recognizable in mirrored previews. These are demo renders
+of the actual UI; the app follows your desktop theme.
 
-```bash
-canon-webcam start
-```
+<img src="assets/screenshots/offline-not-responding.png" alt="Warning symbol and camera recovery instructions in the video feed" width="512">
 
-Stop it after the call:
+[More settings and video options](docs/advanced.md)
 
-```bash
-canon-webcam stop
-```
+## Common problems
 
-The installer also tries to enable systemd user lingering so the service can run
-after boot before you log in. If you do not need any user services before login,
-disable lingering too:
-
-```bash
-sudo loginctl disable-linger "$USER"
-```
-
-Run the pipeline in the foreground when you want direct terminal output:
-
-```bash
-canon-webcam stream
-```
-
-Test only the virtual webcam device, without the Canon camera:
-
-```bash
-canon-webcam test-source
-```
-
-Stop foreground commands with `Ctrl+C`.
-
-## What Install Does
-
-`canon-webcam install`:
-
-- Installs `gphoto2`, `ffmpeg`, `v4l2loopback`, `v4l-utils`, and launcher
-  helpers through apt.
-- Copies the command to `/usr/local/bin/canon-webcam`.
-- Writes persistent `v4l2loopback` config for the selected video device.
-- Installs and enables `~/.config/systemd/user/canon-webcam.service`.
-- Adds the current user to the `video` group when needed.
-- Tries to enable systemd user lingering so the virtual webcam can be populated
-  after boot. If lingering cannot be enabled, the service starts after login.
-- Installs the Kubuntu/Plasma launcher entries.
-
-Refresh the installed command, service, and launchers after editing this repo:
-
-```bash
-./canon-webcam.sh install
-```
-
-Refresh only the launchers:
-
-```bash
-canon-webcam install-launchers
-```
-
-Remove only the launchers:
-
-```bash
-canon-webcam remove-launchers
-```
-
-## Device and Quality
-
-The default virtual webcam is `/dev/video42` named `Canon-Webcam`.
-
-Use a different video number:
-
-```bash
-./canon-webcam.sh install --video-nr 12
-```
-
-The default stream is 1280x720 with 12fps Canon input and 12fps virtual webcam
-output. Many Canon bodies expose live view through `gphoto2` at a low frame
-rate, so the default favors a real 720p image without asking `ffmpeg` to invent
-extra frames.
-
-Choose another size or rate:
-
-```bash
-canon-webcam stream --width 640 --height 480
-canon-webcam stream --width 1920 --height 1080
-canon-webcam stream --width 1280 --height 720 --camera-fps 12 --fps 12
-```
-
-Install-time choices are persisted into the systemd user service. Re-run
-`canon-webcam install` with new options, then restart the service:
-
-```bash
-canon-webcam install --width 1280 --height 720 --camera-fps 12 --fps 12
-canon-webcam restart
-```
-
-If your camera produces frames faster, raise both `--camera-fps` and `--fps`.
-
-## How It Works
-
-The service keeps one persistent `ffmpeg` writer attached to the loopback device.
-Canon capture and the fallback test pattern both feed that writer, so video apps
-do not have to survive the virtual webcam writer closing and reopening.
-
-Before each capture attempt, the script stops common desktop camera claimers,
-including GNOME/GVFS gphoto helpers and KDE KIO camera/MTP workers. For EOS
-bodies such as the Canon EOS 7D Mark II, it also prepares live view with
-`capturetarget=0` and `eosviewfinder=1`.
-
-Disable that Canon EOS preparation if it causes trouble on another body:
-
-```bash
-canon-webcam install --no-set-viewfinder
-canon-webcam restart
-```
-
-## Troubleshooting
-
-Start with:
-
-```bash
-canon-webcam doctor
-canon-webcam logs
-```
-
-Common fixes:
-
-| Symptom | Try |
+| Problem | Try |
 | --- | --- |
-| `/dev/video42` is missing | Reboot once after install. If Secure Boot is enabled, enroll the DKMS module signing key when Kubuntu asks. |
-| Video app does not list `Canon-Webcam` | Close Zoom, OBS, browsers, and video settings windows, then run `canon-webcam hard-reset`. |
-| Loopback exists but is not writable | Run `canon-webcam reset-loopback`. Close any app holding the video device first. |
-| `gphoto2` does not detect the camera | Check for a USB data cable, disable camera Wi-Fi, use the correct camera mode, and reconnect USB. |
-| Camera is detected but not responding to PTP commands | Turn the camera off, unplug USB, wait a few seconds, turn it back on, then reconnect. |
-| Canon capture starts and then fails quickly | Increase the settle delay or use timed segments as shown below. |
+| Webcam missing in a video app | Turn on Camera Bridge, then close and reopen the video app. Reboot once if the virtual driver was just installed. |
+| Camera not connected | Check power, the USB data cable, and the camera's USB/Wi-Fi settings. |
+| Camera not responding | Try video/movie mode. Turn the camera off, unplug USB, then turn it on and reconnect. |
+| App is open but the camera does not start | Some apps hide camera use from detection. Turn off **Use the camera automatically** in Settings to keep video on. |
+| JPEG passthrough gives no picture | Turn off experimental JPEG passthrough in Advanced, save, then reopen your video app. Raw video is the default. |
 
-Increase the camera settle delay for slower bodies:
-
-```bash
-CANON_WEBCAM_CAMERA_SETTLE_DELAY=5 canon-webcam install
-canon-webcam restart
-```
-
-Canon capture runs continuously by default. Opt into periodic capture restarts
-when troubleshooting a stalled camera session:
+For more details, open **Settings → Advanced → Connection details → View logs**, or run:
 
 ```bash
-CANON_WEBCAM_CAMERA_SEGMENT_SECONDS=30 canon-webcam install
-canon-webcam restart
+camera-bridge doctor
+camera-bridge logs
 ```
 
-Return to continuous capture:
+## Update or remove
+
+Quit the tray before installing a newer `.deb`, then reopen Camera Bridge.
+Saved preferences are retained.
+
+To remove it, turn off **Show the tray icon at login**, quit the app, then run:
 
 ```bash
-CANON_WEBCAM_CAMERA_SEGMENT_SECONDS=0 canon-webcam install
-canon-webcam restart
+sudo apt remove camera-bridge
 ```
 
-Reload loopback config after changing the video number, label, or loopback queue:
-
-```bash
-canon-webcam reset-loopback
-```
-
-`hard-reset` stops the service, clears stale `gphoto2` and `ffmpeg` processes
-started by this app, reloads `v4l2loopback`, and starts the service again.
-Linux cannot unload `v4l2loopback` while another app is holding the video device
-open.
-
-Some Canon models are detected by `gphoto2` but do not expose live-view movie
-capture through it. Those models will fail when capture starts.
-
-## Remove
-
-```bash
-canon-webcam uninstall
-```
-
-Packages and any currently loaded `v4l2loopback` module are left in place.
+[Installation and APT setup](docs/installation.md) ·
+[Advanced usage](docs/advanced.md) ·
+[Building and testing](docs/development.md)
