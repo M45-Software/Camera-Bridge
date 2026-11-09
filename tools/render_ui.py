@@ -2,6 +2,7 @@
 """Render the real Qt widgets in a dark palette with isolated demo service data."""
 import importlib.util
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import time
@@ -10,12 +11,48 @@ import time
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 os.environ.setdefault('QT_SCALE_FACTOR', '2')
 
-from PyQt5.QtCore import QPoint
-from PyQt5.QtGui import QColor, QFont, QIcon, QPalette
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QPoint, QRect, QTimer, Qt
+from PyQt5.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPalette
+from PyQt5.QtWidgets import QApplication, QMessageBox
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / 'assets/screenshots'
+
+
+def render_tray_icons(gui, temporary):
+    """Show actual app assets on a dark tray background, including the live blink."""
+    states = [
+        ('off', 'Disconnected', 'No camera detected'),
+        ('connected', 'Connected', 'Camera detected over USB'),
+        ('starting', 'Starting', 'Preparing live view'),
+        ('awake', 'Live view on', 'Video processing paused'),
+        ('live', 'Sending video', 'Activity dot blinks'),
+        ('warning', 'Needs attention', 'Check camera and USB'),
+    ]
+    for frame in range(2):
+        canvas = QImage(1320, 560, QImage.Format_ARGB32)
+        canvas.fill(QColor('#232629'))
+        painter = QPainter(canvas)
+        painter.scale(2, 2)
+        for index, (name, title, detail) in enumerate(states):
+            x, y = (index % 3) * 220, (index // 3) * 140
+            icon_name = 'live-dim' if name == 'live' and frame else name
+            icon = QIcon(str(ROOT/'assets'/f'tray-{icon_name}.svg'))
+            painter.drawPixmap(x+86, y+16, 48, 48, icon.pixmap(96, 96))
+            painter.setPen(QColor('#eff0f1'))
+            painter.setFont(QFont('DejaVu Sans', 11, QFont.DemiBold))
+            painter.drawText(QRect(x, y+75, 220, 25), Qt.AlignCenter, title)
+            painter.setPen(QColor('#a6b6ae'))
+            painter.setFont(QFont('DejaVu Sans', 9))
+            painter.drawText(QRect(x, y+101, 220, 24), Qt.AlignCenter, detail)
+        painter.end()
+        target = temporary/f'tray-icons-{frame}.png'
+        assert canvas.save(str(target))
+        if frame == 0:
+            assert canvas.save(str(OUTPUT/'tray-icons-dark.png'))
+    subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                    '-framerate', '4/3', '-i', str(temporary/'tray-icons-%d.png'),
+                    '-vf', 'scale=660:280', '-loop', '0', str(OUTPUT/'tray-icons-dark.gif')], check=True)
 
 
 def main():
@@ -121,6 +158,14 @@ def main():
         app.processEvents()
         assert menu.grab().save(str(OUTPUT / 'tray-menu-dark.png'))
         menu.hide()
+        def capture_quit_confirmation():
+            dialog = app.activeModalWidget()
+            assert isinstance(dialog, QMessageBox)
+            assert dialog.grab().save(str(OUTPUT/'quit-confirmation-dark.png'))
+            dialog.button(QMessageBox.Cancel).click()
+        QTimer.singleShot(0, capture_quit_confirmation)
+        assert not window.confirm_quit()
+        render_tray_icons(gui, temp)
         window.tray.hide()
         window.hide()
     print(f'Rendered settings and tray menu to {OUTPUT}')

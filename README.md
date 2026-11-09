@@ -10,6 +10,35 @@ The virtual webcam stays available while the camera rests.
 Camera Bridge is an independent project, not affiliated with or endorsed by Canon.
 Compatibility varies by model; hardware testing so far has used a **Canon EOS 7D Mark II**.
 
+## Screenshots
+
+Dark-mode renders of the actual app with demo status. The app follows your desktop theme.
+
+| Main window | Tray menu |
+| --- | --- |
+| <img src="assets/screenshots/settings-dark.png" alt="Camera Bridge controls with automatic saving, login options, Close window, and Quit" width="420"> | <img src="assets/screenshots/tray-menu-dark.png" alt="Tray menu with camera connection, live view, video activity, and manual camera controls" width="360"> |
+
+**Tray icons**
+
+<img src="assets/screenshots/tray-icons-dark.gif" alt="Six tray states: disconnected, connected, starting, live view on with processing paused, sending video with a blinking activity dot, and needs attention" width="660">
+
+<details>
+<summary>Settings, advanced options, and quit confirmation</summary>
+
+**Everyday settings** — automatic use, the rest delay, and notifications.
+
+<img src="assets/screenshots/settings-general-dark.png" alt="Everyday camera settings with automatic saving" width="460">
+
+**Advanced options** — picture size, timing, and experimental JPEG passthrough.
+
+<img src="assets/screenshots/advanced-video-dark.png" alt="Advanced video settings with the JPEG compatibility warning" width="530">
+
+**Quit confirmation** — close the window to keep the tray and webcam running.
+
+<img src="assets/screenshots/quit-confirmation-dark.png" alt="Quit confirmation offering Cancel, Close window, or Quit and stop webcam" width="460">
+
+</details>
+
 ## Install from APT
 
 Add the [signed M45 Software repository](https://m45software.com/apt/) once:
@@ -64,9 +93,6 @@ The tray menu and tooltip show whether the camera is connected, whether live vie
 is on, and whether video is being sent to an app. A green activity dot blinks only
 while camera images are arriving.
 
-<img src="assets/screenshots/settings-dark.png" alt="Camera Bridge controls in dark mode" width="420">
-<img src="assets/screenshots/tray-menu-dark.png" alt="Tray menu showing camera connection, live view, and video activity" width="360">
-
 **Make webcam available at login** and **Show tray icon at login** are on the
 main window and enabled by default. Each can be turned off independently.
 
@@ -80,8 +106,7 @@ camera control**. These temporary overrides preserve the virtual device and rese
 when the webcam service restarts.
 
 The video feed also explains when it is waiting, starting, or unable to connect.
-Large symbols remain recognizable in mirrored previews. These are demo renders
-of the actual UI; the app follows your desktop theme.
+Large symbols remain recognizable in mirrored previews.
 
 <img src="assets/screenshots/offline-not-responding.png" alt="Warning symbol and camera recovery instructions in the video feed" width="512">
 
