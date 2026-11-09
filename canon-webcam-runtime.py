@@ -257,6 +257,7 @@ def watch(seconds, command):
         stats_file = root / 'frames.json'
         reset_at = time.monotonic()
         paused_at = reset_at
+        last_activity = reset_at
         no_clients_since = reset_at
         idle = demand_mode
         live_view_stopped = False
@@ -359,11 +360,12 @@ def watch(seconds, command):
                     if not desired and not live_view_stopped and (forced_off or (seconds > 0 and now - no_clients_since >= seconds)):
                         live_view_stopped = True
                         child.send_signal(signal.SIGALRM)
-                last_frame = reset_at
+                last_frame = max(reset_at, last_activity)
                 try:
                     last_frame = max(last_frame, float(path.read_text()))
                 except (OSError, ValueError):
                     pass
+                last_activity = last_frame
                 if idle and wanted and last_frame > paused_at:
                     idle = False
                 if seconds > 0 and not idle and now - last_frame >= seconds:

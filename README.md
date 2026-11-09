@@ -36,7 +36,7 @@ Download a package from [Releases](https://github.com/M45-Software/Camera-Bridge
 then install it from the download folder:
 
 ```bash
-sudo apt install ./camera-bridge_0.2.1_all.deb
+sudo apt install ./camera-bridge_0.2.2_all.deb
 ```
 
 To build it yourself, see [development instructions](docs/development.md).

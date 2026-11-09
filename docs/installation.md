@@ -10,7 +10,7 @@ live-view support. For long calls, consider AC power and disable camera auto pow
 ## Local Debian package
 
 ```bash
-sudo apt install ./camera-bridge_0.2.1_all.deb
+sudo apt install ./camera-bridge_0.2.2_all.deb
 ```
 
 The architecture-independent package installs the app, icon, systemd user unit,

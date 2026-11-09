@@ -58,14 +58,13 @@ class FrameMonitorTests(unittest.TestCase):
 from pathlib import Path
 state = Path(os.environ['CANON_WEBCAM_ACTIVITY_FILE'])
 events = Path(os.environ['CAMERA_TEST_EVENTS'])
-until = time.monotonic() + 0.9
+stall = events.with_name('stall')
 
 def log(text):
     with events.open('a') as out: out.write(text + '\\n')
 
 def resume(*_):
-    global until
-    until = time.monotonic() + 0.9
+    stall.unlink(missing_ok=True)
     log('resumed')
 
 signal.signal(signal.SIGUSR1, lambda *_: log('standby'))
@@ -74,8 +73,10 @@ signal.signal(signal.SIGTERM, lambda *_: exit(0))
 Path(os.environ['CANON_WEBCAM_CONTROL_READY']).touch()
 log('ready')
 while True:
-    if time.monotonic() < until:
-        state.write_text(str(time.monotonic()))
+    if not stall.exists():
+        update = state.with_suffix('.new')
+        update.write_text(str(time.monotonic()))
+        update.replace(state)
     time.sleep(0.02)
 ''')
             child = subprocess.Popen([sys.executable, str(HELPER), 'watch', '0.4', sys.executable, str(fake)],
@@ -93,12 +94,15 @@ while True:
                 wait_for(lambda: 'ready' in contents())
                 time.sleep(0.65)  # Longer than idle limit, but images are still arriving.
                 self.assertNotIn('standby', contents())
+                (root / 'stall').touch()
                 wait_for(lambda: 'standby' in contents())
                 self.assertIsNone(child.poll(), 'standby must not stop the service')
+                resumes = contents().count('resumed')
                 child.send_signal(signal.SIGUSR2)
-                wait_for(lambda: 'resumed' in contents())
+                wait_for(lambda: contents().count('resumed') > resumes)
                 time.sleep(0.65)
                 self.assertEqual(contents().count('standby'), 1)
+                (root / 'stall').touch()
                 wait_for(lambda: contents().count('standby') == 2)
                 self.assertIsNone(child.poll())
             finally:
