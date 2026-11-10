@@ -7,8 +7,8 @@
 Run from the checkout on Ubuntu/Kubuntu 24.04:
 
 ```bash
-./packaging/build-deb.sh 0.3.0
-sudo apt install ./dist/camera-bridge_0.3.0_amd64.deb
+./packaging/build-deb.sh 0.3.1
+sudo apt install ./dist/camera-bridge_0.3.1_amd64.deb
 ```
 
 Packaging needs Bash, Python 3, and `dpkg-deb`; it does not require root.
@@ -17,7 +17,7 @@ The `amd64` package contains the Canon SDK runtime plus scripts, Qt controls, ic
 service, virtual-device defaults, and documentation.
 
 The GitHub Actions release workflow tests pushes to `main` and version tags.
-Pushing a tag such as `v0.3.0` builds a tested package, creates its GitHub release,
+Pushing a tag such as `v0.3.1` builds a tested package, creates its GitHub release,
 and calls the APT publisher directly. Manually published GitHub releases also
 trigger the publisher. Draft releases are rejected. Package versions are immutable:
 change the version whenever package bytes change.

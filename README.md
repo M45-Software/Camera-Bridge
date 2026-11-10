@@ -65,7 +65,7 @@ Download a package from [Releases](https://github.com/M45-Software/Camera-Bridge
 then install it from the download folder:
 
 ```bash
-sudo apt install ./camera-bridge_0.3.0_amd64.deb
+sudo apt install ./camera-bridge_0.3.1_amd64.deb
 ```
 
 To build it yourself, see [development instructions](docs/development.md).
@@ -112,6 +112,34 @@ asks before stopping the webcam and leaving camera live view.
 The tray also offers **Keep camera on**, **Keep camera off**, and **Use automatic
 camera control**. These temporary overrides preserve the virtual device and reset
 when the webcam service restarts.
+
+Open **Camera controls…** from the main window or tray for a separate window with
+**Exposure**, **Color**, and **Focus** tabs. Available controls include ISO,
+shutter speed, aperture, exposure compensation, white balance, Kelvin temperature,
+Picture Style, live-view AF method, and one-shot or near/far focus. Changes apply
+immediately to the camera and remain camera settings; opening the window does
+not reset them. Refresh reads changes made on the camera itself.
+
+Choices come from the camera's current mode and lens. Unavailable settings stay
+disabled. The exposure dial and lens AF/MF switch must be changed on the camera.
+Live controls share the Canon SDK capture session; gphoto2 cannot share its USB
+connection, so select the Canon SDK backend to change settings during video.
+On the tested 7D Mark II, Movie Servo AF and Continuous AF are not exposed by
+the SDK. Set Movie Servo AF on the camera. Canon also disables Movie Servo AF
+at 59.94/50 fps on this body; use 29.97/30 fps for continuous autofocus
+([Canon's guide](https://in.canon/en/support/8202199200)).
+
+<details>
+<summary>Camera controls window</summary>
+
+<img src="assets/screenshots/camera-controls-exposure-dark.png" alt="Exposure controls showing camera-supported ISO, shutter speed and aperture choices" width="570">
+<img src="assets/screenshots/camera-controls-color-dark.png" alt="Color controls for white balance, Kelvin temperature and Picture Style" width="570">
+<img src="assets/screenshots/camera-controls-focus-dark.png" alt="Focus controls showing available AF methods and unavailable Movie Servo AF on the 7D Mark II" width="570">
+
+</details>
+
+The tray and main window show **Reconnecting…** when the camera disconnects or
+live-view frames stop, returning to live status when camera frames resume.
 
 The video feed also explains when it is waiting, starting, or unable to connect.
 Large symbols remain recognizable in mirrored previews.

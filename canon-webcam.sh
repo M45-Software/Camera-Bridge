@@ -402,6 +402,7 @@ install_binary() {
     run_privileged install -m 0644 "$(dirname "$self")/canon-webcam-gui.py" "$GUI_PATH"
     run_privileged install -m 0644 "$(dirname "$self")/canon-webcam-runtime.py" /usr/share/canon-webcam/canon-webcam-runtime.py
     run_privileged install -m 0644 "$(dirname "$self")/canon-webcam-capture.py" /usr/share/canon-webcam/canon-webcam-capture.py
+    run_privileged install -m 0644 "$(dirname "$self")/canon_webcam_controls.py" /usr/share/canon-webcam/canon_webcam_controls.py
     if [[ -f "$(dirname "$self")/vendor/canon/linux-x86_64/libEDSDK.so" && "$(uname -m)" == x86_64 ]]; then
       run_privileged install -D -m 0644 "$(dirname "$self")/vendor/canon/linux-x86_64/libEDSDK.so" /usr/lib/camera-bridge/libEDSDK.so
     fi
@@ -1273,6 +1274,8 @@ run_camera_stream_once() {
   if [[ -f "$capture_helper" ]]; then
     capture=(/usr/bin/python3 "$capture_helper" --seconds "$CAMERA_SEGMENT_SECONDS")
   fi
+  # Only the relay can confirm that a complete camera frame has arrived.
+  if (( CAMERA_RECOVERY_WAIT == 0 )); then write_stream_state "Starting camera..."; fi
   if [[ -n "${CANON_WEBCAM_ACTIVITY_FILE:-}" ]]; then
     CANON_WEBCAM_LIVE_VIEW_SIZE="$LIVE_VIEW_SIZE" /usr/bin/python3 "$(runtime_helper_path)" relay "$CAMERA_FIFO" "${capture[@]}" &
   else
@@ -1280,7 +1283,6 @@ run_camera_stream_once() {
   fi
   CAMERA_GPHOTO_PID="$!"
   if (( CAMERA_IDLE == 1 )); then terminate_process "$CAMERA_GPHOTO_PID"; fi
-  if (( CAMERA_RECOVERY_WAIT == 0 )); then write_stream_state "Capturing Canon live view"; fi
 
   # Control signals can interrupt Bash wait before the capture process exits.
   # Keep tracking that process until it really exits; otherwise it can retain USB.
@@ -1674,6 +1676,7 @@ uninstall_all() {
     "$GUI_PATH" \
     /usr/share/canon-webcam/canon-webcam-runtime.py \
     /usr/share/canon-webcam/canon-webcam-capture.py \
+    /usr/share/canon-webcam/canon_webcam_controls.py \
     /usr/lib/camera-bridge/libEDSDK.so \
     /usr/share/canon-webcam/status-{idle,starting,warning,disconnected}.png \
     /usr/share/canon-webcam/warning.svg \

@@ -80,7 +80,10 @@ main "$@"
                 time.sleep(0.35)
                 self.assertEqual((root / 'frames').stat().st_size, size, 'Standby must stop producing fallback frames')
                 process.send_signal(signal.SIGUSR2)
-                until(lambda: 'Capturing' in state())
+                # This fake camera never emits a frame; launching its process
+                # must not be reported as successful live capture.
+                until(lambda: 'Starting camera' in state())
+                self.assertNotIn('Capturing', state())
                 self.assertEqual(int((root / 'writer-pid').read_text()), writer_pid)
                 os.kill(writer_pid, 0)
             finally:

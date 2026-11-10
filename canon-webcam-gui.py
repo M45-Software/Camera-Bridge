@@ -84,6 +84,27 @@ def tray_presentation(connected, running, live_view, receiving, starting, proble
     return icon, (connection, camera, video)
 
 
+def camera_headline(raw, usage, identity):
+    """USB presence and recent frames take precedence over stale stream text."""
+    if usage.get('manual_off'):
+        return 'Camera kept off'
+    if not identity:
+        return 'Reconnecting…'
+    if 'Getting webcam ready' in raw:
+        return 'Getting ready…'
+    if 'Getting video ready' in raw:
+        return 'Getting video ready…'
+    if 'not responding' in raw.lower():
+        return 'Camera not responding'
+    if 'Capturing' in raw:
+        return 'Camera in use' if usage.get('camera_frames', 0) > 0 else 'Reconnecting…'
+    if 'Starting' in raw:
+        return 'Starting camera…'
+    if 'Lost connection' in raw or 'disconnected' in raw.lower():
+        return 'Reconnecting…'
+    return 'Ready'
+
+
 def startup_enabled(path):
     try:
         return not any(line.strip().lower() == 'hidden=true' for line in path.read_text().splitlines())
@@ -138,6 +159,7 @@ class Webcam(QWidget):
         app.aboutToQuit.connect(self.shutdown)
         self.initialized = False
         self.poll = None
+        self.camera_controls = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(14)
@@ -165,6 +187,9 @@ class Webcam(QWidget):
         self.toggle.setEnabled(False)
         self.toggle.clicked.connect(lambda: self.control('stop' if self.running else 'start'))
         layout.addWidget(self.toggle)
+        self.camera_controls_button = QPushButton('Camera controls…')
+        self.camera_controls_button.clicked.connect(self.open_camera_controls)
+        layout.addWidget(self.camera_controls_button)
         self.retry = QPushButton('Try again')
         self.retry.clicked.connect(lambda: self.control('retry'))
         self.retry.hide()
@@ -237,6 +262,7 @@ class Webcam(QWidget):
             action.setEnabled(False)
         menu.addSeparator()
         menu.addAction('Open Camera Bridge…', self.open)
+        menu.addAction('Camera controls…', self.open_camera_controls)
         menu.addSeparator()
         menu.addAction('Keep camera on', lambda: self.control('force-start'))
         menu.addAction('Keep camera off', lambda: self.control('force-stop'))
@@ -251,6 +277,14 @@ class Webcam(QWidget):
         self.timer.timeout.connect(self.refresh)
         self.timer.start(750)
         self.refresh()
+
+    def open_camera_controls(self):
+        if self.camera_controls is None:
+            self.camera_controls = CameraControlsWindow(self)
+        self.camera_controls.show()
+        self.camera_controls.raise_()
+        self.camera_controls.activateWindow()
+        self.camera_controls.request()
 
     def build_settings(self):
         self.advanced = QDialog(self)
@@ -605,20 +639,7 @@ class Webcam(QWidget):
         self.toggle.setText('Turn off' if self.running else 'Turn on')
         if state == 'active':
             raw = text.splitlines()[1] if len(text.splitlines()) > 1 else ''
-            if 'Getting webcam ready' in raw:
-                headline = 'Getting ready…'
-            elif 'Getting video ready' in raw:
-                headline = 'Getting video ready…'
-            elif 'not responding' in raw.lower():
-                headline = 'Camera not responding'
-            elif 'Capturing' in raw:
-                headline = 'Camera in use' if usage.get('camera_frames', 0) > 0 else 'Starting camera…'
-            elif 'Starting' in raw:
-                headline = 'Starting camera…'
-            elif 'Lost connection' in raw or 'disconnected' in raw.lower():
-                headline = 'Camera disconnected'
-            else:
-                headline = 'Ready'
+            headline = camera_headline(raw, usage, connected_camera())
             app_names = []
             try:
                 app_names = list(dict.fromkeys(client['name'] for client in usage['clients']))
@@ -629,8 +650,8 @@ class Webcam(QWidget):
                 summary = 'Video is paused. Use the tray menu to start the camera or return to automatic control.'
             elif headline == 'Camera not responding':
                 summary = 'Try video/movie mode. Check camera power and USB. Retrying automatically while an app needs it.'
-            elif headline == 'Camera disconnected':
-                summary = 'Check the USB connection and camera power.'
+            elif headline == 'Reconnecting…':
+                summary = 'Waiting for camera video. Check USB and camera power. Retrying automatically while an app needs it.'
             elif headline == 'Getting ready…':
                 summary = 'Preparing the virtual webcam for your apps.'
             elif headline == 'Getting video ready…':
@@ -703,7 +724,7 @@ class Webcam(QWidget):
             self.applied_values = self.current_values()
         self.startup_ready = True
         self.update_pending_settings()
-        self.retry.setVisible(self.running and headline in ('Camera not responding', 'Camera disconnected'))
+        self.retry.setVisible(self.running and headline in ('Camera not responding', 'Camera disconnected', 'Reconnecting…'))
         if not self.busy and not self.quitting:
             self.report_problem(headline, summary)
         self.operation_feedback()
@@ -728,6 +749,8 @@ class Webcam(QWidget):
                                       headline == 'Camera not responding', apps)
         if identity and self.running and headline == 'Getting video ready…':
             icon, rows = 'starting', (rows[0], 'Checking camera…', 'Preparing video')
+        if self.running and headline == 'Reconnecting…':
+            icon, rows = 'warning', (rows[0], 'Reconnecting…', 'Waiting for camera video')
         if self.running and usage.get('manual_off'):
             icon, rows = ('connected' if identity else 'off'), (rows[0], 'Camera kept off', 'Video paused')
         elif self.running and usage.get('manual_override'):
@@ -737,7 +760,8 @@ class Webcam(QWidget):
         self.menu_camera.setIcon(self.tray_icons['connected' if identity else 'off'])
         self.menu_live_view.setIcon(self.tray_icons['awake' if rows[1] == 'Live view on' else icon])
         self.menu_video.setIcon(self.tray_icons['live' if icon == 'live' else 'ready'])
-        self.menu_status.setText('Camera Bridge' if self.running else 'Camera Bridge — Off')
+        self.menu_status.setText('Camera Bridge — Reconnecting…' if self.running and headline == 'Reconnecting…'
+                                 else 'Camera Bridge' if self.running else 'Camera Bridge — Off')
         self.tray.setToolTip('Camera Bridge\n' + '\n'.join(rows))
         self.set_tray_state(icon)
 
@@ -760,7 +784,7 @@ class Webcam(QWidget):
         self.tray.setIcon(self.tray_icons['live' if self.blink_on else 'live-dim'])
 
     def report_problem(self, headline, guidance):
-        if headline in ('Camera not responding', 'Camera disconnected'):
+        if headline in ('Camera not responding', 'Camera disconnected', 'Reconnecting…'):
             now = time.monotonic()
             if self.notifications.isChecked() and (headline != self.last_problem or now - self.last_notification_at >= 300):
                 self.tray.showMessage('Camera Bridge — ' + headline, guidance, QSystemTrayIcon.Warning, 10000)
@@ -899,6 +923,171 @@ class Webcam(QWidget):
             bytes(self.log_process.readAll()).decode(errors='replace')))
         self.log_process.start('journalctl', ['--user', '-u', SERVICE, '-n', '100', '--no-pager'])
         self.log_window.show()
+
+
+class CameraControlsWindow(QDialog):
+    """Camera-owned settings, applied immediately through the capture worker."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle('Camera Bridge — Camera controls')
+        self.resize(570, 500)
+        self.process = None
+        self.fields = {}
+        self.focus_buttons = []
+        self.snapshot = None
+        self.last_operation = 'read'
+        self.helper = Path(__file__).with_name('canon-webcam-capture.py')
+        layout = QVBoxLayout(self)
+        heading = QLabel('Camera controls')
+        heading.setStyleSheet('font-size: 22px; font-weight: 600;')
+        layout.addWidget(heading)
+        description = QLabel('Changes apply immediately to the camera. Use Refresh after changing its shooting mode or lens switch.')
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        self.feedback = QLabel('Reading camera settings…')
+        self.feedback.setWordWrap(True)
+        self.feedback.setTextFormat(Qt.PlainText)
+        layout.addWidget(self.feedback)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        # Import only metadata; this module never opens a camera from the UI.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from canon_webcam_controls import PROPERTIES
+        for group in ('Exposure', 'Color', 'Focus'):
+            page = QWidget()
+            form = QFormLayout(page)
+            for name, (_, label, category) in PROPERTIES.items():
+                if category != group:
+                    continue
+                combo = QComboBox()
+                combo.setMinimumContentsLength(24)
+                combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+                combo.addItem('Not read yet')
+                combo.setEnabled(False)
+                combo.activated.connect(lambda index, key=name: self.change(key, index))
+                self.fields[name] = combo
+                form.addRow(label, combo)
+            if group == 'Focus':
+                self.focus_step = QComboBox()
+                for label, step in (('Fine', 1), ('Medium', 2), ('Coarse', 3)):
+                    self.focus_step.addItem(label, step)
+                form.addRow('Focus step', self.focus_step)
+                buttons = QHBoxLayout()
+                for label, action in (('Focus nearer', 'near'), ('One-shot AF', 'auto'), ('Focus farther', 'far'), ('Stop AF', 'stop')):
+                    button = QPushButton(label)
+                    button.setEnabled(False)
+                    button.clicked.connect(lambda _, value=action: self.request(dict(operation='focus', action=value, step=self.focus_step.currentData())))
+                    buttons.addWidget(button)
+                    self.focus_buttons.append(button)
+                form.addRow(buttons)
+                note = QLabel('Focus buttons are available while camera video is running. Keep the lens switch on AF for remote focus. On the 7D II, Movie Servo AF does not work at 59.94/50 fps; use 29.97/30 fps for continuous autofocus.')
+                note.setWordWrap(True)
+                form.addRow(note)
+            self.tabs.addTab(page, group)
+        footer = QHBoxLayout()
+        self.refresh_button = QPushButton('Refresh')
+        self.refresh_button.clicked.connect(lambda: self.request())
+        footer.addWidget(self.refresh_button)
+        footer.addStretch()
+        close = QPushButton('Close')
+        close.clicked.connect(self.hide)
+        footer.addWidget(close)
+        layout.addLayout(footer)
+        self.timeout = QTimer(self)
+        self.timeout.setSingleShot(True)
+        self.timeout.setInterval(10000)
+        self.timeout.timeout.connect(self.request_timed_out)
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.setInterval(4000)
+        self.refresh_timer.timeout.connect(self.auto_refresh)
+        self.refresh_timer.start()
+
+    def auto_refresh(self):
+        if self.isVisible() and not any(combo.view().isVisible() for combo in self.fields.values()):
+            self.request()
+
+    def change(self, name, index):
+        value = self.fields[name].itemData(index)
+        if value is not None:
+            self.request(dict(operation='set', name=name, value=value))
+
+    def request(self, request=None):
+        if self.process is not None:
+            return
+        if PREVIEW:
+            self.feedback.setText('Camera controls are unavailable in the temporary preview.')
+            return
+        request = request or dict(operation='read')
+        self.last_operation = request['operation']
+        for field in self.fields.values():
+            field.setEnabled(False)
+        for button in self.focus_buttons:
+            button.setEnabled(False)
+        self.refresh_button.setEnabled(False)
+        if self.last_operation != 'read' or self.snapshot is None:
+            self.feedback.setText('Applying camera change…' if self.last_operation != 'read' else 'Reading camera settings…')
+        self.process = QProcess(self)
+        self.process.finished.connect(self.finished)
+        self.process.errorOccurred.connect(self.failed)
+        self.process.start('/usr/bin/python3', [str(self.helper), '--control-request', json.dumps(request)])
+        self.timeout.start()
+
+    def finished(self):
+        if self.process is None:
+            return
+        process, self.process = self.process, None
+        self.timeout.stop()
+        self.refresh_button.setEnabled(True)
+        try:
+            data = json.loads(bytes(process.readAllStandardOutput()))
+            if not data.get('ok'):
+                raise ValueError(data.get('error', 'Cannot read camera settings.'))
+            self.render(data)
+            self.feedback.setText('Camera change applied.' if self.last_operation != 'read' else 'Connected · ' + data.get('backend', 'Canon SDK'))
+        except (ValueError, TypeError, KeyError) as error:
+            self.feedback.setText(str(error) if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError)
+                                  else 'Camera controls disconnected. Check camera power and USB, then Refresh.')
+        process.deleteLater()
+
+    def render(self, data):
+        self.snapshot = data
+        for field in self.fields.values():
+            field.clear()
+            field.addItem('Unavailable')
+            field.setEnabled(False)
+        for field in data.get('fields', []):
+            combo = self.fields.get(field['name'])
+            if combo is None:
+                continue
+            combo.clear()
+            choices = field.get('choices', [])
+            for choice in choices:
+                combo.addItem(choice['label'], choice['value'])
+            index = combo.findData(field.get('value'))
+            if index < 0:
+                combo.insertItem(0, field.get('display', 'Unavailable'), field.get('value'))
+                index = 0
+                # The current value may be readable but not settable.
+                combo.model().item(0).setEnabled(False)
+            combo.setCurrentIndex(index)
+            combo.setEnabled(bool(choices) and field.get('available', False))
+            combo.setToolTip(field.get('reason', 'Applies immediately to the camera.'))
+        for button in self.focus_buttons:
+            button.setEnabled(data.get('focus_available', False))
+
+    def failed(self, error):
+        if error == QProcess.FailedToStart:
+            self.finished()
+
+    def request_timed_out(self):
+        if self.process is not None:
+            self.process.finished.disconnect(self.finished)
+            self.process.kill()
+            self.process.waitForFinished(1000)
+            self.process.deleteLater()
+            self.process = None
+            self.refresh_button.setEnabled(True)
+            self.feedback.setText('Camera did not respond. Check USB and camera power, then Refresh.')
 
 
 def main():

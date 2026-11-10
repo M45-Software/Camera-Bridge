@@ -2,6 +2,7 @@
 """Canon SDK capture with process isolation and automatic gphoto2 fallback."""
 import argparse
 import ctypes as c
+import json
 import os
 from pathlib import Path
 import selectors
@@ -11,6 +12,13 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+from canon_webcam_controls import CameraControls, ControlServer, remote_request, safe_handle
+
+
+class PropertyDesc(c.Structure):
+    _fields_ = [('form', c.c_int32), ('access', c.c_int32),
+                ('count', c.c_int32), ('values', c.c_int32 * 128)]
 
 
 def library_path():
@@ -90,6 +98,8 @@ class SDK:
             'EdsOpenSession': [p], 'EdsCloseSession': [p], 'EdsRelease': [p],
             'EdsGetPropertyData': [p, u, c.c_int32, u, p],
             'EdsSetPropertyData': [p, u, c.c_int32, u, p],
+            'EdsGetPropertyDesc': [p, u, c.POINTER(PropertyDesc)],
+            'EdsSendCommand': [p, u, c.c_int32],
             'EdsCreateMemoryStream': [c.c_uint64, c.POINTER(p)],
             'EdsCreateEvfImageRef': [p, c.POINTER(p)], 'EdsDownloadEvfImage': [p, p],
             'EdsGetLength': [p, c.POINTER(c.c_uint64)], 'EdsGetPointer': [p, c.POINTER(p)],
@@ -110,9 +120,19 @@ class SDK:
 
     def set(self, prop, value):
         value = c.c_uint32(value)
-        self.check(self.api.EdsSetPropertyData(self.camera, prop, 0, 4, c.byref(value)), 'Set live view')
+        self.check(self.api.EdsSetPropertyData(self.camera, prop, 0, 4, c.byref(value)), 'Change camera setting')
 
-    def open(self):
+    def describe(self, prop):
+        description = PropertyDesc()
+        self.check(self.api.EdsGetPropertyDesc(self.camera, prop, c.byref(description)), 'Available camera settings')
+        if not 0 <= description.count <= 128:
+            raise RuntimeError('Invalid camera setting descriptor')
+        return [value & 0xffffffff for value in description.values[:description.count]]
+
+    def command(self, command, parameter):
+        self.check(self.api.EdsSendCommand(self.camera, command, parameter), 'Focus command')
+
+    def open(self, live_view=True):
         self.check(self.api.EdsInitializeSDK(), 'Initialize')
         self.initialized = True
         self.check(self.api.EdsGetCameraList(c.byref(self.cameras)), 'Find cameras')
@@ -123,6 +143,8 @@ class SDK:
         self.check(self.api.EdsGetChildAtIndex(self.cameras, 0, c.byref(self.camera)), 'Select camera')
         self.check(self.api.EdsOpenSession(self.camera), 'Open session')
         self.opened = True
+        if not live_view:
+            return
         self.restore[0x500] = self.get(0x500)
         mode = self.get(0x501)
         # Movie mode reports 2 on the 7D II and rejects writes to this property.
@@ -179,14 +201,46 @@ class SDK:
 
 def sdk_worker():
     sdk = SDK(library_path())
+    controls = CameraControls(sdk)
+    server = None
     try:
         sdk.open()
+        if os.environ.get('XDG_RUNTIME_DIR'):
+            try:
+                server = ControlServer(controls)
+            except (OSError, RuntimeError) as error:
+                log(f'Camera controls unavailable: {error}')
         while True:
+            if server:
+                server.poll()
             frame = sdk.frame()
             if frame:
                 write_all(frame)
             else:
                 time.sleep(0.001)
+    finally:
+        if server:
+            server.close()
+        try:
+            controls.stop_focus()
+        except RuntimeError:
+            pass
+        sdk.close()
+
+
+def control_request(request):
+    result = remote_request(request)
+    if result is not None:
+        return result
+    # An idle camera can be queried without enabling live view or changing it.
+    sdk = SDK(library_path())
+    try:
+        sdk.open(live_view=False)
+        if request.get('operation') == 'focus':
+            return dict(ok=False, error='Start camera video with the Canon SDK backend to use focus buttons.')
+        return safe_handle(CameraControls(sdk), request)
+    except RuntimeError as error:
+        return dict(ok=False, error=f'{error}. Check camera power and USB. If video is running, use the updated Canon SDK capture backend; gphoto2 cannot share its USB session.')
     finally:
         sdk.close()
 
@@ -289,7 +343,18 @@ def main():
     parser.add_argument('--backend', choices=('auto', 'edsdk', 'gphoto2'))
     parser.add_argument('--sdk-worker', action='store_true')
     parser.add_argument('--prefers-sdk', action='store_true')
+    parser.add_argument('--control-request', help='JSON camera control request')
     args = parser.parse_args()
+    if args.control_request is not None:
+        try:
+            request = json.loads(args.control_request)
+            if not isinstance(request, dict):
+                raise ValueError('Invalid camera control request')
+            result = control_request(request)
+        except (OSError, RuntimeError, ValueError) as error:
+            result = dict(ok=False, error=str(error))
+        print(json.dumps(result))
+        return 0
     if args.prefers_sdk:
         return 0 if backend() == 'edsdk' or (backend() == 'auto' and library_path().is_file()) else 1
     if args.seconds < 0:

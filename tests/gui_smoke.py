@@ -1,5 +1,6 @@
 """Exercise Qt controls with a fake service; never touches a real camera/service."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -136,6 +137,21 @@ esac
     assert window.tray_state == 'live' and window.blink_timer.isActive()
     bright=window.tray.icon().cacheKey(); window.animate_tray()
     assert window.tray.icon().cacheKey()!=bright
+    # A vanished USB device overrides stale frame counts and live-view state.
+    assert gui.camera_headline('Capturing Canon live view', {'camera_frames':10}, None) == 'Reconnecting…'
+    assert gui.camera_headline('Capturing Canon live view', {}, 'usb:001,005') == 'Reconnecting…'
+    assert gui.camera_headline('Starting camera...', {}, 'usb:001,005') == 'Starting camera…'
+    assert gui.camera_headline('Capturing Canon live view', {'camera_frames':10}, 'usb:001,005') == 'Camera in use'
+    assert gui.camera_headline('Camera disconnected', {'manual_off':True}, None) == 'Camera kept off'
+    gui.connected_camera=lambda:None
+    window.update_tray_status('Reconnecting…', {'camera_frames':10,'clients':[{'name':'OBS'}]})
+    assert window.tray_state == 'warning' and not window.blink_timer.isActive()
+    assert window.menu_live_view.text() == 'Reconnecting…'
+    assert 'Reconnecting' in window.menu_status.text() and 'Reconnecting' in window.tray.toolTip()
+    assert window.menu_video.text() == 'Waiting for camera video'
+    gui.connected_camera=lambda:'usb:001,005'
+    window.update_tray_status('Camera in use', {'camera_frames':11})
+    assert window.tray_state == 'live'
     window.update_tray_status('Ready',{'manual_off':True})
     assert window.menu_live_view.text() == 'Camera kept off'
     assert not window.blink_timer.isActive()
@@ -152,6 +168,58 @@ esac
     window.notifications.setChecked(False)
     window.report_problem('Camera disconnected','Check USB')
     assert len(notices)==1
+    # Camera controls are a separate window reachable from both entry points.
+    fixture = dict(ok=True, backend='Canon SDK', focus_available=True, fields=[
+        dict(name='iso', value=72, display='100', available=True, choices=[dict(value=72,label='100'),dict(value=80,label='200')]),
+        dict(name='af_mode', value=0, display='One-shot AF', available=True, choices=[], reason='Use the lens switch'),
+        dict(name='movie_servo_af', display='Not available in this camera mode', available=False, choices=[])])
+    (temp/'camera-fixture').write_text(json.dumps(fixture))
+    helper = temp/'camera-helper.py'
+    helper.write_text('''import json,sys,time
+from pathlib import Path
+root=Path(__file__).parent
+request=json.loads(sys.argv[2])
+if request.get('operation')=='hang': time.sleep(30)
+with (root/'camera-requests').open('a') as log: log.write(json.dumps(request)+'\\n')
+data=json.loads((root/'camera-fixture').read_text())
+if request.get('operation')=='set':
+    if request['value']==999:
+        data=dict(ok=False,error='Camera rejected this setting')
+    else:
+        data['fields'][0]['value']=request['value']
+        (root/'camera-fixture').write_text(json.dumps(data))
+print(json.dumps(data))
+''')
+    window.camera_controls = gui.CameraControlsWindow(window)
+    panel = window.camera_controls
+    panel.helper = helper
+    window.camera_controls_button.click()
+    until(lambda:panel.process is None)
+    assert panel.isVisible() and panel.tabs.count()==3
+    assert panel.fields['iso'].isEnabled() and panel.fields['iso'].currentData()==72
+    assert not panel.fields['af_mode'].isEnabled() and not panel.fields['movie_servo_af'].isEnabled()
+    assert all(button.isEnabled() for button in panel.focus_buttons)
+    assert all(json.loads(line)['operation']=='read' for line in (temp/'camera-requests').read_text().splitlines())
+    panel.fields['iso'].activated.emit(1)
+    until(lambda:panel.process is None)
+    assert panel.fields['iso'].currentData()==80 and panel.feedback.text()=='Camera change applied.'
+    panel.focus_buttons[1].click()
+    until(lambda:panel.process is None)
+    assert json.loads((temp/'camera-requests').read_text().splitlines()[-1])['action']=='auto'
+    panel.request(dict(operation='set',name='iso',value=999))
+    until(lambda:panel.process is None)
+    assert panel.feedback.text()=='Camera rejected this setting'
+    assert not panel.fields['iso'].isEnabled()
+    panel.timeout.setInterval(30)
+    panel.request(dict(operation='hang'))
+    until(lambda:panel.process is None)
+    assert panel.refresh_button.isEnabled() and 'did not respond' in panel.feedback.text()
+    panel.timeout.setInterval(10000)
+    panel.hide()
+    next(a for a in window.tray.contextMenu().actions() if a.text()=='Camera controls…').trigger()
+    until(lambda:panel.process is None)
+    assert panel.isVisible() and panel.fields['iso'].isEnabled()
+    panel.hide()
     # Closing hides; Cancel and Close window in the quit dialog never stop video.
     window.open(); before=len(calls()); window.close_button.click()
     assert not window.isVisible() and 'stop' not in calls()[before:]
@@ -178,4 +246,4 @@ esac
     assert quit_calls==[(True,'stop')]
     app.quit=original_quit
     window.shutdown(); window.tray.hide()
-    print('Qt smoke passed: autosave, login defaults, deferred apply, tray overrides, and quit confirmation')
+    print('Qt smoke passed: camera controls, autosave, login defaults, deferred apply, tray overrides, and quit confirmation')
