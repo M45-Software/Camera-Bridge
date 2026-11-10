@@ -89,7 +89,7 @@ def camera_headline(raw, usage, identity):
     if usage.get('manual_off'):
         return 'Camera kept off'
     if not identity:
-        return 'Reconnecting…'
+        return 'Waiting for camera'
     if 'Getting webcam ready' in raw:
         return 'Getting ready…'
     if 'Getting video ready' in raw:
@@ -650,6 +650,8 @@ class Webcam(QWidget):
                 summary = 'Video is paused. Use the tray menu to start the camera or return to automatic control.'
             elif headline == 'Camera not responding':
                 summary = 'Try video/movie mode. Check camera power and USB. Retrying automatically while an app needs it.'
+            elif headline == 'Waiting for camera':
+                summary = 'Turn on or connect your camera when you need it. The virtual webcam remains available.'
             elif headline == 'Reconnecting…':
                 summary = 'Waiting for camera video. Check USB and camera power. Retrying automatically while an app needs it.'
             elif headline == 'Getting ready…':
@@ -790,7 +792,7 @@ class Webcam(QWidget):
                 self.tray.showMessage('Camera Bridge — ' + headline, guidance, QSystemTrayIcon.Warning, 10000)
                 self.last_notification_at = now
             self.last_problem = headline
-        elif headline in ('Camera in use', 'Off', 'Ready'):
+        elif headline in ('Camera in use', 'Off', 'Ready', 'Waiting for camera'):
             self.last_problem = None
 
 

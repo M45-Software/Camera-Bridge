@@ -193,6 +193,27 @@ standby_encoding() { echo recovery-paused; wc -l <"$HOME/prepares"; exit 0; }
         self.assertIn('recovery-paused', result.stdout)
         self.assertEqual(result.stdout.splitlines()[-1], '1')
 
+    def test_powered_off_camera_at_boot_enters_standby(self):
+        result = self.run_script('''cleanup_stream() { :; }
+need_cmd() { :; }
+ensure_loopback_for_writer() { :; }
+resolve_native_resolution() { :; }
+start_background_test_source() { LOOPBACK_WRITER_PID="$BASHPID"; echo "$1"; }
+stop_camera_mount_helpers() { :; }
+camera_wait_stable() { echo detect >>"$HOME/detections"; return 1; }
+camera_prepare_live_view() { echo unexpected-capture; }
+standby_encoding() {
+  echo "idle=$CAMERA_IDLE recovery=$CAMERA_RECOVERY_WAIT"
+  wc -l <"$HOME/detections"
+  exit 0
+}
+''', 'stream', '--device', '/dev/null', '--timeout', '0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('idle=1 recovery=1', result.stdout)
+        self.assertEqual(result.stdout.splitlines()[-1], '1')
+        self.assertNotIn('unexpected-capture', result.stdout)
+        self.assertNotIn('retrying in', result.stderr)
+
     def test_recovery_retries_same_usb_device_without_changing_warning(self):
         result = self.run_script('''stream_camera() {
 CAMERA_IDLE=1

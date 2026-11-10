@@ -1351,9 +1351,10 @@ stream_camera() {
     stop_camera_mount_helpers
 
     if ! camera_wait_stable; then
-      warn "no stable gphoto2-compatible camera detected; retrying in ${CAMERA_RETRY_DELAY}s"
+      log "Waiting for a camera; virtual webcam remains available"
       start_background_test_source "Camera disconnected"
-      wait_for_camera_retry
+      CAMERA_RECOVERY_WAIT=1
+      CAMERA_IDLE=1
       continue
     fi
 

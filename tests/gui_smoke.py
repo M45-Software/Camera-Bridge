@@ -138,12 +138,20 @@ esac
     bright=window.tray.icon().cacheKey(); window.animate_tray()
     assert window.tray.icon().cacheKey()!=bright
     # A vanished USB device overrides stale frame counts and live-view state.
-    assert gui.camera_headline('Capturing Canon live view', {'camera_frames':10}, None) == 'Reconnecting…'
+    assert gui.camera_headline('Capturing Canon live view', {'camera_frames':10}, None) == 'Waiting for camera'
+    for raw in ('', 'Getting webcam ready', 'Standby: Waiting for a video app. Virtual webcam ready.', 'Camera disconnected'):
+        assert gui.camera_headline(raw, {}, None) == 'Waiting for camera'
     assert gui.camera_headline('Capturing Canon live view', {}, 'usb:001,005') == 'Reconnecting…'
     assert gui.camera_headline('Starting camera...', {}, 'usb:001,005') == 'Starting camera…'
     assert gui.camera_headline('Capturing Canon live view', {'camera_frames':10}, 'usb:001,005') == 'Camera in use'
     assert gui.camera_headline('Camera disconnected', {'manual_off':True}, None) == 'Camera kept off'
     gui.connected_camera=lambda:None
+    window.update_tray_status('Waiting for camera', {'camera_frames':10})
+    assert window.tray_state == 'off' and not window.blink_timer.isActive()
+    assert window.menu_camera.text() == 'No camera connected'
+    assert window.menu_live_view.text() == 'Live view off'
+    assert 'Reconnecting' not in window.tray.toolTip()
+    gui.connected_camera=lambda:'usb:001,005'
     window.update_tray_status('Reconnecting…', {'camera_frames':10,'clients':[{'name':'OBS'}]})
     assert window.tray_state == 'warning' and not window.blink_timer.isActive()
     assert window.menu_live_view.text() == 'Reconnecting…'
@@ -162,6 +170,8 @@ esac
     notices=[]
     window.tray.showMessage=lambda *args:notices.append(args)
     window.notifications.setChecked(True)
+    window.report_problem('Waiting for camera','Turn on your camera when needed')
+    assert not notices
     window.report_problem('Camera not responding','Check camera')
     window.report_problem('Camera not responding','Check camera')
     assert len(notices)==1

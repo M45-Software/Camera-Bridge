@@ -142,8 +142,11 @@ the SDK. Set Movie Servo AF on the camera. Canon also disables Movie Servo AF
 at 59.94/50 fps on this body; use 29.97/30 fps for continuous autofocus
 ([Canon's guide](https://in.canon/en/support/8202199200)).
 
-The tray and main window show **Reconnecting…** when the camera disconnects or
-live-view frames stop, returning to live status when camera frames resume.
+The tray and main window show **Waiting for camera** when the camera is powered
+off or disconnected, including at login. This is a normal idle state with no
+warning notifications. The virtual webcam stays available. **Reconnecting…**
+indicates a connected camera whose live-view frames have stopped; live status
+returns when camera frames resume.
 
 The video feed also explains when it is waiting, starting, or unable to connect.
 Large symbols remain recognizable in mirrored previews.
