@@ -1,4 +1,5 @@
 python3-pyqt5
+libqt5svg5
 fonts-dejavu-core
 ffmpeg
 shellcheck
