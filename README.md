@@ -1,7 +1,8 @@
 # Camera Bridge
 
 Use a compatible Canon camera as a Linux webcam, with automatic camera control
-and a simple KDE tray app. Targets Kubuntu/Ubuntu 24.04.
+and a KDE tray app. Adjust exposure, color, and focus from a dedicated Camera
+Controls window while video is running. Targets Kubuntu/Ubuntu 24.04.
 
 Open your video app to start the camera. Close its camera preview to pause video
 processing; after **60 seconds** without use, the camera leaves live view.
@@ -16,14 +17,28 @@ Dark-mode renders of the actual app with demo status. The app follows your deskt
 
 | Main window | Tray menu |
 | --- | --- |
-| <img src="assets/screenshots/settings-dark.png" alt="Camera Bridge controls with automatic saving, login options, Close window, and Quit" width="420"> | <img src="assets/screenshots/tray-menu-dark.png" alt="Tray menu with camera connection, live view, video activity, and manual camera controls" width="360"> |
+| <img src="assets/screenshots/settings-dark.png" alt="Camera Bridge main window with the Camera controls button, automatic saving, and login options" width="420"> | <img src="assets/screenshots/tray-menu-dark.png" alt="Tray menu with direct access to Camera controls, camera status, and manual start and stop" width="360"> |
+
+### Live camera controls
+
+Choose **Camera controls…** in the main window or tray. Changes apply immediately
+through the active Canon SDK session. Choices follow the connected camera's
+shooting mode and lens; unavailable settings stay disabled.
+
+**Exposure** — ISO, shutter speed, aperture, and exposure compensation.
+
+<img src="assets/screenshots/camera-controls-exposure-dark.png" alt="Camera Controls Exposure tab with ISO, shutter speed, aperture, and exposure compensation" width="570">
+
+| Color | Focus |
+| --- | --- |
+| White balance, Kelvin temperature, and Picture Style. | AF method, one-shot autofocus, and fine, medium, or coarse near/far focus. |
+| <img src="assets/screenshots/camera-controls-color-dark.png" alt="Camera Controls Color tab with white balance, Kelvin temperature, and Picture Style" width="420"> | <img src="assets/screenshots/camera-controls-focus-dark.png" alt="Camera Controls Focus tab with AF method and one-shot, near, far, and stop focus buttons" width="420"> |
+
+### Settings and status
 
 **Tray icons**
 
 <img src="assets/screenshots/tray-icons-dark.png" alt="Six tray states: disconnected, connected, starting, live view on with processing paused, sending video with an activity dot, and needs attention" width="660">
-
-<details>
-<summary>Settings, advanced options, and quit confirmation</summary>
 
 **Everyday settings** — automatic use, the rest delay, and notifications.
 
@@ -36,8 +51,6 @@ Dark-mode renders of the actual app with demo status. The app follows your deskt
 **Quit confirmation** — close the window to keep the tray and webcam running.
 
 <img src="assets/screenshots/quit-confirmation-dark.png" alt="Quit confirmation offering Cancel, Close window, or Quit and stop webcam" width="460">
-
-</details>
 
 ## Install from APT
 
@@ -128,15 +141,6 @@ On the tested 7D Mark II, Movie Servo AF and Continuous AF are not exposed by
 the SDK. Set Movie Servo AF on the camera. Canon also disables Movie Servo AF
 at 59.94/50 fps on this body; use 29.97/30 fps for continuous autofocus
 ([Canon's guide](https://in.canon/en/support/8202199200)).
-
-<details>
-<summary>Camera controls window</summary>
-
-<img src="assets/screenshots/camera-controls-exposure-dark.png" alt="Exposure controls showing camera-supported ISO, shutter speed and aperture choices" width="570">
-<img src="assets/screenshots/camera-controls-color-dark.png" alt="Color controls for white balance, Kelvin temperature and Picture Style" width="570">
-<img src="assets/screenshots/camera-controls-focus-dark.png" alt="Focus controls showing available AF methods and unavailable Movie Servo AF on the 7D Mark II" width="570">
-
-</details>
 
 The tray and main window show **Reconnecting…** when the camera disconnects or
 live-view frames stop, returning to live status when camera frames resume.

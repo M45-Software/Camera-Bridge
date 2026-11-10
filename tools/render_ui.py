@@ -66,7 +66,7 @@ def main():
         runtime.mkdir(parents=True)
         runtime.parent.chmod(0o700)
         (runtime / 'status').write_text('Capturing Canon live view\n')
-        (runtime / 'usage.json').write_text('{"clients":[{"pid":2048,"name":"Firefox"}],"uncertain":false,"camera_fps":16.0,"camera_frames":44}')
+        (runtime / 'usage.json').write_text('{"clients":[{"pid":2048,"name":"OBS"}],"uncertain":false,"camera_fps":29.7,"camera_frames":44}')
         (runtime / 'camera.json').write_text('{"width":1024,"height":576}')
         fake = temp / 'systemctl'
         fake.write_text('#!/bin/sh\n'
@@ -77,6 +77,7 @@ def main():
         gui = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(gui)
         gui.COMMAND = str(fake)
+        gui.connected_camera = lambda: 'usb:001,005'
 
         app = QApplication([])
         app.setStyle('Fusion')
@@ -113,6 +114,37 @@ def main():
         window.show()
         app.processEvents()
         assert window.grab().save(str(OUTPUT / 'settings-dark.png'))
+
+        # Demo data follows the tested 7D II's available controls. Rendering
+        # never opens USB or runs the control-request helper.
+        controls = gui.CameraControlsWindow(window)
+        controls.refresh_timer.stop()
+        from canon_webcam_controls import PROPERTIES, value_label
+        values = dict(exposure_mode=3, iso=0x60, shutter=0x68, aperture=0x25,
+                      exposure_compensation=0, white_balance=9,
+                      color_temperature=4000, picture_style=0x85,
+                      af_mode=0, live_af_mode=2)
+        choices = dict(iso=[0,0x48,0x50,0x58,0x60,0x68,0x70],
+                       shutter=[0x60,0x65,0x68,0x6b,0x6d,0x70],
+                       aperture=[0x25,0x28,0x2b,0x2d,0x30,0x38],
+                       white_balance=[0,1,8,2,3,4,5,6,9],
+                       color_temperature=list(range(2500,10001,100)),
+                       picture_style=[0x87,0x81,0x82,0x83,0x84,0x85,0x86,0x21,0x22,0x23],
+                       live_af_mode=[2,3,1])
+        fields = []
+        for name in PROPERTIES:
+            value = values.get(name)
+            fields.append(dict(name=name, value=value, available=value is not None,
+                               display=value_label(name,value) if value is not None else 'Not available in this camera mode',
+                               choices=[dict(value=v,label=value_label(name,v)) for v in choices.get(name,[])]))
+        controls.render(dict(ok=True, backend='Canon SDK', fields=fields, focus_available=True))
+        controls.feedback.setText('Connected · Canon SDK')
+        controls.show()
+        for index, name in enumerate(('exposure','color','focus')):
+            controls.tabs.setCurrentIndex(index)
+            app.processEvents()
+            assert controls.grab().save(str(OUTPUT/f'camera-controls-{name}-dark.png'))
+        controls.hide()
 
         window.busy = True
         window.pending_action = 'stop'
