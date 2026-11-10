@@ -89,6 +89,14 @@ esac
     until(lambda:'AUTO_TIMEOUT=0' in gui.CONFIG.read_text())
     window.auto_pause.setChecked(True)
     until(lambda:'AUTO_TIMEOUT=65' in gui.CONFIG.read_text())
+    assert window.backend.currentData() == 0
+    window.backend.setCurrentIndex(window.backend.findData(2))
+    until(lambda:'CAPTURE_BACKEND=2\n' in gui.CONFIG.read_text())
+    assert window.current_values()['CAPTURE_BACKEND'] == 2
+    window.backend.setCurrentIndex(window.backend.findData(1))
+    until(lambda:'CAPTURE_BACKEND=1\n' in gui.CONFIG.read_text())
+    window.backend.setCurrentIndex(0)
+    until(lambda:'CAPTURE_BACKEND=0\n' in gui.CONFIG.read_text())
     (temp/'state').write_text('active')
     window.refresh(); until(lambda:window.poll is None and window.running)
     window.applied_values=window.current_values()

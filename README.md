@@ -65,7 +65,7 @@ Download a package from [Releases](https://github.com/M45-Software/Camera-Bridge
 then install it from the download folder:
 
 ```bash
-sudo apt install ./camera-bridge_0.2.2_all.deb
+sudo apt install ./camera-bridge_0.3.0_amd64.deb
 ```
 
 To build it yourself, see [development instructions](docs/development.md).
@@ -86,6 +86,14 @@ your video apps.
 
 Native live-view resolution and automatic frame timing are enabled by default.
 The tested EOS 7D Mark II supplies a 1024 × 576 live-view image; other models may differ.
+
+Canon SDK capture is preferred automatically, with gphoto2 as a fallback. The
+amd64 package includes the runtime, so users do not need the developer SDK.
+Choose **Settings → Advanced → Video → Capture backend** to force Canon SDK or
+gphoto2. Explicit choices disable fallback; Automatic is the default.
+On the tested 7D Mark II, SDK capture delivered about 30 FPS versus about 15 FPS
+with gphoto2, at the same native resolution. Actual rates depend on camera settings.
+See [third-party runtime notices](THIRD_PARTY_NOTICES.md).
 
 ## Controls and status
 

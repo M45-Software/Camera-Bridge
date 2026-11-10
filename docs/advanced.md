@@ -4,6 +4,31 @@
 
 Most users can keep the defaults. These controls are under **Settings → Advanced**.
 
+## Capture backend
+
+The Video tab offers **Automatic (Canon SDK preferred)**, **Canon SDK**, and
+**gphoto2**. Automatic uses the bundled Canon runtime and falls back to gphoto2 if
+the runtime cannot load, the camera is unsupported, capture crashes, or no frames
+arrive for 12 seconds. An explicit backend choice disables fallback and reports
+capture errors through the usual camera status and logs. Changes save
+automatically; apply them to reconnect a running webcam.
+
+The runtime is bundled in the Linux amd64 package. Other source-install platforms
+can use gphoto2. No Canon account, subscription, headers, or compiler is needed
+to run the bundled backend. Native dimensions are detected using the selected
+backend. Raising webcam output FPS does not increase the camera's source FPS.
+
+```bash
+camera-bridge stream --backend auto
+camera-bridge stream --backend edsdk
+camera-bridge stream --backend gphoto2
+```
+
+For diagnostics, `CANON_WEBCAM_EDSDK_LIBRARY` can point to a different local
+runtime. The selected backend is stored as `CAPTURE_BACKEND=0` (Automatic), `1`
+(Canon SDK), or `2` (gphoto2). Runtime provenance and notices are in
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+
 ## Picture size and timing
 
 **Use camera native resolution** and **Follow camera frame timing** are enabled

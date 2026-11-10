@@ -23,7 +23,7 @@ jobs:
           QT_QPA_PLATFORM=offscreen python3 tests/gui_smoke.py
       - name: Build Debian package
         run: |
-          version=0.2.2
+          version=0.3.0
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then version="${GITHUB_REF_NAME#v}"; fi
           bash packaging/build-deb.sh "$version"
           cd dist

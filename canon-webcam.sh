@@ -15,6 +15,7 @@ NATIVE_RESOLUTION="${CANON_WEBCAM_NATIVE_RESOLUTION:-1}"
 LIVE_VIEW_SIZE="${CANON_WEBCAM_LIVE_VIEW_SIZE:-1}"
 AUTO_FPS="${CANON_WEBCAM_AUTO_FPS:-1}"
 PASSTHROUGH="${CANON_WEBCAM_PASSTHROUGH:-0}"
+CAPTURE_BACKEND="${CANON_WEBCAM_CAPTURE_BACKEND:-0}"
 LIVE_VIEW_ACTIVE=0
 CAMERA_RESPONSIVE=1
 CAMERA_RECOVERY_WAIT=0
@@ -124,6 +125,7 @@ Options:
   --native-resolution        Use the camera's native live-view size (default).
   --fixed-resolution         Use --width/--height instead of native size.
   --live-view-size SIZE       keep|large|medium|small; default large if supported.
+  --backend NAME             auto (SDK preferred), edsdk, or gphoto2.
   --timeout SECONDS          Idle live-view / no-image timeout (default 60); 0 disables.
   --start                    Start the service after install.
 
@@ -151,6 +153,10 @@ parse_args() {
     case "$1" in
       --mjpeg-passthrough) PASSTHROUGH=1; shift ;;
       --raw-video) PASSTHROUGH=0; shift ;;
+      --backend)
+        [[ $# -ge 2 ]] || die "--backend requires auto, edsdk, or gphoto2"
+        case "$2" in auto) CAPTURE_BACKEND=0 ;; edsdk) CAPTURE_BACKEND=1 ;; gphoto2) CAPTURE_BACKEND=2 ;; *) die "invalid capture backend" ;; esac
+        shift 2 ;;
       --auto-fps) AUTO_FPS=1; shift ;;
       --manual-fps) AUTO_FPS=0; shift ;;
       --on-demand) ON_DEMAND=1; shift ;;
@@ -235,6 +241,7 @@ parse_args() {
   done
 
   [[ "$PASSTHROUGH" =~ ^[01]$ ]] || die "invalid passthrough setting"
+  [[ "$CAPTURE_BACKEND" =~ ^[0-2]$ ]] || die "invalid capture backend"
   (( PASSTHROUGH == 0 || NATIVE_RESOLUTION == 1 )) || die "MJPEG passthrough requires native resolution"
   [[ "$AUTO_FPS" =~ ^[01]$ && "$ON_DEMAND" =~ ^[01]$ && "$NATIVE_RESOLUTION" =~ ^[01]$ && "$LIVE_VIEW_SIZE" =~ ^[0-3]$ ]] || die "invalid automatic camera options"
   [[ "$AUTO_TIMEOUT" =~ ^(0|[1-9][0-9]{0,7})$ ]] || die "--timeout must be 0 or a positive number of seconds (maximum 99999999)"
@@ -355,6 +362,8 @@ ensure_universe_packages_visible() {
 install_packages() {
   local packages=(
     gphoto2
+    libusb-1.0-0
+    libstdc++6
     ffmpeg
     v4l2loopback-dkms
     v4l2loopback-utils
@@ -392,6 +401,10 @@ install_binary() {
     run_privileged install -d /usr/share/canon-webcam
     run_privileged install -m 0644 "$(dirname "$self")/canon-webcam-gui.py" "$GUI_PATH"
     run_privileged install -m 0644 "$(dirname "$self")/canon-webcam-runtime.py" /usr/share/canon-webcam/canon-webcam-runtime.py
+    run_privileged install -m 0644 "$(dirname "$self")/canon-webcam-capture.py" /usr/share/canon-webcam/canon-webcam-capture.py
+    if [[ -f "$(dirname "$self")/vendor/canon/linux-x86_64/libEDSDK.so" && "$(uname -m)" == x86_64 ]]; then
+      run_privileged install -D -m 0644 "$(dirname "$self")/vendor/canon/linux-x86_64/libEDSDK.so" /usr/lib/camera-bridge/libEDSDK.so
+    fi
     run_privileged install -m 0644 "$(dirname "$self")"/assets/status-*.png /usr/share/canon-webcam/
     run_privileged install -m 0644 "$(dirname "$self")/assets/warning.svg" /usr/share/canon-webcam/warning.svg
     run_privileged install -m 0644 "$(dirname "$self")/assets/tray-ready.svg" "$(dirname "$self")/assets/tray-live.svg" "$(dirname "$self")/assets/tray-live-dim.svg" "$(dirname "$self")/assets/tray-off.svg" "$(dirname "$self")"/assets/tray-{connected,awake,starting,warning}.svg /usr/share/canon-webcam/
@@ -609,6 +622,7 @@ Environment=CANON_WEBCAM_AUTO_TIMEOUT=${AUTO_TIMEOUT}
 Environment=CANON_WEBCAM_ON_DEMAND=${ON_DEMAND}
 Environment=CANON_WEBCAM_AUTO_FPS=${AUTO_FPS}
 Environment=CANON_WEBCAM_PASSTHROUGH=${PASSTHROUGH}
+Environment=CANON_WEBCAM_CAPTURE_BACKEND=${CAPTURE_BACKEND}
 Environment=CANON_WEBCAM_NATIVE_RESOLUTION=${NATIVE_RESOLUTION}
 Environment=CANON_WEBCAM_LIVE_VIEW_SIZE=${LIVE_VIEW_SIZE}
 ExecStart=${INSTALL_PATH} stream
@@ -856,6 +870,13 @@ write_live_view_state() {
 camera_prepare_live_view() {
   CAMERA_RESPONSIVE=1
   write_live_view_state unknown
+  local capture_helper
+  capture_helper="$(dirname "$(runtime_helper_path)")/canon-webcam-capture.py"
+  if [[ -f "$capture_helper" ]] && CANON_WEBCAM_CAPTURE_BACKEND="$CAPTURE_BACKEND" /usr/bin/python3 "$capture_helper" --prefers-sdk; then
+    # The SDK owns its camera session and enables live view when capturing.
+    LIVE_VIEW_ACTIVE=1
+    return
+  fi
   if [[ "$SET_VIEWFINDER" -ne 1 ]]; then
     return
   fi
@@ -901,8 +922,8 @@ resolve_native_resolution() {
     cached="$(/usr/bin/python3 -c 'import json,sys
 try:
  d=json.load(open(sys.argv[1])); w,h=d["width"],d["height"]
- if d.get("live_view_size")==int(sys.argv[2]) and 16<=w<=16384 and 16<=h<=16384 and not(w%2 or h%2): print(w,h)
-except (OSError,ValueError,KeyError,TypeError): pass' "$cache" "$LIVE_VIEW_SIZE")"
+ if d.get("live_view_size")==int(sys.argv[2]) and d.get("capture_backend",0)==int(sys.argv[3]) and 16<=w<=16384 and 16<=h<=16384 and not(w%2 or h%2): print(w,h)
+except (OSError,ValueError,KeyError,TypeError): pass' "$cache" "$LIVE_VIEW_SIZE" "$CAPTURE_BACKEND")"
   fi
   if [[ "$cached" =~ ^([0-9]+)[[:space:]]([0-9]+)$ ]]; then
     WIDTH="${BASH_REMATCH[1]}"; HEIGHT="${BASH_REMATCH[2]}"
@@ -931,7 +952,7 @@ CACHED
       WIDTH="${BASH_REMATCH[1]}"; HEIGHT="${BASH_REMATCH[2]}"
       CAMERA_READY=1
       mkdir -p "$(dirname "$cache")"
-      printf '%s' "$measured" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); d["live_view_size"]=int(sys.argv[1]); d["cached"]=False; print(json.dumps(d))' "$LIVE_VIEW_SIZE" >"$cache.tmp"
+      printf '%s' "$measured" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); d["live_view_size"]=int(sys.argv[1]); d["capture_backend"]=int(sys.argv[2]); d["cached"]=False; print(json.dumps(d))' "$LIVE_VIEW_SIZE" "$CAPTURE_BACKEND" >"$cache.tmp"
       mv "$cache.tmp" "$cache"
       if [[ "${CANON_WEBCAM_IN_SERVICE:-0}" == 1 && -n "${XDG_RUNTIME_DIR:-}" ]]; then
         mkdir -p "$XDG_RUNTIME_DIR/canon-webcam"
@@ -1247,6 +1268,11 @@ run_camera_stream_once() {
   if (( CAMERA_SEGMENT_SECONDS > 0 )); then
     capture=(gphoto2 --stdout "--capture-movie=${CAMERA_SEGMENT_SECONDS}s")
   fi
+  local capture_helper
+  capture_helper="$(dirname "$(runtime_helper_path)")/canon-webcam-capture.py"
+  if [[ -f "$capture_helper" ]]; then
+    capture=(/usr/bin/python3 "$capture_helper" --seconds "$CAMERA_SEGMENT_SECONDS")
+  fi
   if [[ -n "${CANON_WEBCAM_ACTIVITY_FILE:-}" ]]; then
     CANON_WEBCAM_LIVE_VIEW_SIZE="$LIVE_VIEW_SIZE" /usr/bin/python3 "$(runtime_helper_path)" relay "$CAMERA_FIFO" "${capture[@]}" &
   else
@@ -1298,6 +1324,7 @@ stream_camera() {
 
   need_cmd gphoto2
   need_cmd ffmpeg
+  export CANON_WEBCAM_CAPTURE_BACKEND="$CAPTURE_BACKEND" CANON_WEBCAM_LIVE_VIEW_SIZE="$LIVE_VIEW_SIZE" CANON_WEBCAM_SET_VIEWFINDER="$SET_VIEWFINDER"
   write_live_view_state unknown
   write_stream_state "Getting webcam ready"
 
@@ -1646,6 +1673,8 @@ uninstall_all() {
     "$INSTALL_PATH" \
     "$GUI_PATH" \
     /usr/share/canon-webcam/canon-webcam-runtime.py \
+    /usr/share/canon-webcam/canon-webcam-capture.py \
+    /usr/lib/camera-bridge/libEDSDK.so \
     /usr/share/canon-webcam/status-{idle,starting,warning,disconnected}.png \
     /usr/share/canon-webcam/warning.svg \
     /usr/share/canon-webcam/tray-ready.svg \
@@ -1672,7 +1701,7 @@ main() {
   if [[ -f "$config" && "$command" =~ ^(install|stream|setup-user|test-source)$ ]]; then
     while IFS='=' read -r key value; do
       case "$key" in
-        WIDTH|HEIGHT|FPS|CAMERA_FPS|AUTO_TIMEOUT|SET_VIEWFINDER|ON_DEMAND|NATIVE_RESOLUTION|LIVE_VIEW_SIZE|AUTO_FPS|PASSTHROUGH)
+        WIDTH|HEIGHT|FPS|CAMERA_FPS|AUTO_TIMEOUT|SET_VIEWFINDER|ON_DEMAND|NATIVE_RESOLUTION|LIVE_VIEW_SIZE|AUTO_FPS|PASSTHROUGH|CAPTURE_BACKEND)
           [[ "$value" =~ ^(0|[1-9][0-9]{0,7})$ ]] || die "invalid setting: $key"
           printf -v "$key" '%s' "$value"
           ;;

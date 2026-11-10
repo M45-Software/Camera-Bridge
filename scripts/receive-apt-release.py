@@ -49,7 +49,7 @@ def receive(command, stream, state, publish):
             raise ValueError('Upload size or checksum does not match.')
         control = subprocess.check_output(['dpkg-deb', '-f', str(package), 'Package', 'Version', 'Architecture'], timeout=30).decode()
         fields = dict(line.split(': ', 1) for line in control.splitlines())
-        if (fields.get('Package'), fields.get('Version'), fields.get('Architecture')) != (name, version, 'all'):
+        if (fields.get('Package'), fields.get('Version')) != (name, version) or fields.get('Architecture') not in ('all', 'amd64'):
             raise ValueError('Package identity, version, or architecture does not match the release.')
         publish(package)
 
@@ -62,7 +62,7 @@ def main():
     if command == 'check':
         if not repository.is_dir() or not list((state / 'gnupg/private-keys-v1.d').glob('*.key')):
             raise ValueError('Archive signing configuration is unavailable.')
-        print('M45 APT receiver ready: camera-bridge / all')
+        print('M45 APT receiver ready: camera-bridge / all, amd64')
         return
 
     def publish(package):

@@ -59,6 +59,7 @@ from pathlib import Path
 root=Path(os.environ['TEST_ROOT'])
 def log(message):
  with (root/'events').open('a') as out: out.write(message+'\\n')
+ with (root/'timings').open('a') as out: out.write(message+' '+str(time.monotonic())+'\\n')
 signal.signal(signal.SIGUSR1,lambda *_:log('paused'))
 signal.signal(signal.SIGUSR2,lambda *_:log('resumed'))
 signal.signal(signal.SIGALRM,lambda *_:log('viewfinder-off'))
@@ -81,6 +82,9 @@ while True: time.sleep(.05)
                 until(lambda:'resumed' in events())
                 monitor.send_signal(signal.SIGUSR1)
                 until(lambda:'paused' in events() and 'viewfinder-off' in events())
+                timings = dict(line.split() for line in (root/'timings').read_text().splitlines())
+                self.assertGreaterEqual(float(timings['viewfinder-off']) - float(timings['paused']), 0.2,
+                                        'Give Bash time to handle pause before sending camera-rest signal')
                 monitor.send_signal(signal.SIGUSR2)
                 until(lambda:events().count('resumed')==2)
                 monitor.send_signal(signal.SIGCONT)

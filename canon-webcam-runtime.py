@@ -64,7 +64,8 @@ def publish_camera_frame(size=None):
             except (OSError, ValueError):
                 pass
             known.update(width=size[0], height=size[1], cached=False,
-                         live_view_size=int(os.environ.get('CANON_WEBCAM_LIVE_VIEW_SIZE', '1')))
+                         live_view_size=int(os.environ.get('CANON_WEBCAM_LIVE_VIEW_SIZE', '1')),
+                         capture_backend=int(os.environ.get('CANON_WEBCAM_CAPTURE_BACKEND', '0')))
             write_json(cache, known)
             write_json(runtime / 'camera.json', known)
     except (OSError, ValueError):
@@ -221,12 +222,15 @@ def probe():
                                   capture_output=True, text=True, timeout=6)
         if 'Readonly: 0' in settings.stdout:
             result['sizes'] = re.findall(r'^Choice: [0-9]+ (.+)$', settings.stdout, re.M)
-        camera = subprocess.Popen(['gphoto2', '--stdout', '--capture-movie=1s'],
+        helper = Path(__file__).with_name('canon-webcam-capture.py')
+        command = ([sys.executable, str(helper), '--seconds', '1'] if helper.exists() else
+                   ['gphoto2', '--stdout', '--capture-movie=1s'])
+        camera = subprocess.Popen(command,
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         try:
             measured = subprocess.run(['ffprobe', '-v', 'error', '-f', 'mjpeg',
                                        '-show_entries', 'stream=width,height', '-of', 'json', '-i', 'pipe:0'],
-                                      stdin=camera.stdout, capture_output=True, timeout=10)
+                                      stdin=camera.stdout, capture_output=True, timeout=30)
             streams = json.loads(measured.stdout).get('streams', [])
             if streams:
                 width, height = streams[0]['width'], streams[0]['height']
@@ -237,7 +241,7 @@ def probe():
             if camera.poll() is None:
                 camera.terminate()
             try:
-                camera.wait(timeout=2)
+                camera.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 camera.kill()
                 camera.wait()
@@ -357,7 +361,11 @@ def watch(seconds, command):
                                 idle = True
                                 paused_at = now
                                 child.send_signal(signal.SIGUSR1)
-                    if not desired and not live_view_stopped and (forced_off or (seconds > 0 and now - no_clients_since >= seconds)):
+                    # Let Bash handle producer shutdown before sending ALRM.
+                    # Back-to-back standard signals can otherwise leave its
+                    # interrupted wait handling only the live-view request.
+                    rest_delay = 0.25 if forced_off else seconds
+                    if not desired and not live_view_stopped and rest_delay > 0 and now - no_clients_since >= rest_delay:
                         live_view_stopped = True
                         child.send_signal(signal.SIGALRM)
                 last_frame = max(reset_at, last_activity)

@@ -22,7 +22,7 @@ CONFIG = CONFIG_ROOT / 'canon-webcam/settings.conf'
 AUTOSTART = CONFIG_ROOT / 'autostart/canon-webcam-tray.desktop'
 WEBCAM_AUTOSTART = CONFIG_ROOT / 'autostart/camera-bridge-webcam.desktop'
 COMMAND = os.environ.get('CANON_WEBCAM_COMMAND') or shutil.which('camera-bridge') or shutil.which('canon-webcam') or str(Path(__file__).with_name('canon-webcam.sh'))
-DEFAULTS = dict(WIDTH=1280, HEIGHT=720, FPS=30, CAMERA_FPS=30, AUTO_TIMEOUT=60, SET_VIEWFINDER=1, ON_DEMAND=1, NATIVE_RESOLUTION=1, LIVE_VIEW_SIZE=1, AUTO_FPS=1, PASSTHROUGH=0, NOTIFICATIONS=1)
+DEFAULTS = dict(WIDTH=1280, HEIGHT=720, FPS=30, CAMERA_FPS=30, AUTO_TIMEOUT=60, SET_VIEWFINDER=1, ON_DEMAND=1, NATIVE_RESOLUTION=1, LIVE_VIEW_SIZE=1, AUTO_FPS=1, PASSTHROUGH=0, CAPTURE_BACKEND=0, NOTIFICATIONS=1)
 
 
 def tray_icon(name):
@@ -217,6 +217,7 @@ class Webcam(QWidget):
                     self.auto_pause, self.viewfinder, self.notifications):
             box.toggled.connect(self.queue_autosave)
         self.size.currentIndexChanged.connect(self.queue_autosave)
+        self.backend.currentIndexChanged.connect(self.queue_autosave)
         self.boot.toggled.connect(self.save_startup)
         self.login.toggled.connect(self.save_startup)
         self.tray_icons = {name: tray_icon(name) for name in ('ready', 'live', 'live-dim', 'off', 'connected', 'awake', 'starting', 'warning')}
@@ -297,6 +298,11 @@ class Webcam(QWidget):
             form.addRow(label, field)
             return field
 
+        self.backend = QComboBox()
+        for label, value in [('Automatic (Canon SDK preferred)', 0), ('Canon SDK', 1), ('gphoto2', 2)]:
+            self.backend.addItem(label, value)
+        self.backend.setToolTip('Automatic falls back to gphoto2 if Canon SDK capture fails. Explicit choices use only the selected backend.')
+        video.addRow('Capture backend', self.backend)
         self.native = checkbox(video, 'Use camera native resolution',
                                'Keep the original live-view size. Turn off to resize the picture.', True)
         self.size = QComboBox()
@@ -673,6 +679,7 @@ class Webcam(QWidget):
             for key in ('WIDTH', 'HEIGHT'):
                 self.fields[key].setEnabled(not self.native.isChecked())
             self.size.setCurrentIndex(self.size.findData(values['LIVE_VIEW_SIZE']))
+            self.backend.setCurrentIndex(max(0, self.backend.findData(values['CAPTURE_BACKEND'])))
             self.initialized = True
         if self.native.isChecked():
             try:
@@ -771,7 +778,7 @@ class Webcam(QWidget):
                       NOTIFICATIONS=int(self.notifications.isChecked()),
                       ON_DEMAND=int(self.on_demand.isChecked()), AUTO_FPS=int(self.auto_fps.isChecked()),
                       PASSTHROUGH=int(self.passthrough.isChecked()), NATIVE_RESOLUTION=int(self.native.isChecked()),
-                      LIVE_VIEW_SIZE=self.size.currentData())
+                      LIVE_VIEW_SIZE=self.size.currentData(), CAPTURE_BACKEND=self.backend.currentData())
         return values
 
     def settings_message(self, message):

@@ -2,9 +2,13 @@
 
 [Back to README](../README.md) · [Building and testing](development.md)
 
-Camera Bridge publishes `camera-bridge_VERSION_all.deb` to the existing signed
+Camera Bridge publishes `camera-bridge_VERSION_amd64.deb` to the existing signed
 M45 Software archive at <https://m45software.com/apt/> (`stable`, `main`, amd64).
-Architecture-independent packages are included in that index.
+The publisher also accepts older architecture-independent Camera Bridge releases.
+
+Before publishing the first 0.3.x amd64 package, update the server's
+`receive-apt-release.py` from this checkout. Older receivers accept only `all`
+and will reject the bundled-runtime package. The updated receiver accepts both.
 
 ## Release flow
 
@@ -31,7 +35,7 @@ an SSH `restrict` entry with a forced command pointing to:
 
 `/home/dist/.local/share/m45-apt/receive-camera-bridge-release.py`
 
-It can publish only `camera-bridge` packages with architecture `all`, up to
+It can publish only `camera-bridge` packages with architecture `all` or `amd64`, up to
 64 MiB. It cannot open a shell, upload arbitrary paths, or forward connections.
 `packaging/apt/ssh_known_hosts` pins the verified server host key. Never replace
 that pin without checking the new key independently.

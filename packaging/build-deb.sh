@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-version="${1:-0.2.2}"
+version="${1:-0.3.0}"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Use a version such as 0.2.0' >&2; exit 1; }
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
@@ -15,6 +15,11 @@ install -m 0644 "$root"/assets/tray-*.svg "$stage/usr/share/canon-webcam/"
 install -m 0644 "$root"/assets/status-*.png "$stage/usr/share/canon-webcam/"
 install -m 0644 "$root/assets/warning.svg" "$stage/usr/share/canon-webcam/warning.svg"
 install -m 0644 "$root/canon-webcam-runtime.py" "$stage/usr/share/canon-webcam/"
+install -m 0644 "$root/canon-webcam-capture.py" "$stage/usr/share/canon-webcam/"
+install -D -m 0644 "$root/vendor/canon/linux-x86_64/libEDSDK.so" "$stage/usr/lib/camera-bridge/libEDSDK.so"
+printf '%s  %s\n' '92aeae98d2d18f641df72695733d68a55993b4149a13a075983895775eaf91b5' "$stage/usr/lib/camera-bridge/libEDSDK.so" | sha256sum -c -
+install -m 0644 "$root/THIRD_PARTY_NOTICES.md" "$stage/usr/share/doc/canon-webcam/"
+install -m 0644 "$root/THIRD_PARTY_NOTICES.md" "$stage/usr/share/doc/canon-webcam/copyright"
 install -m 0644 "$root/canon-webcam-gui.py" "$stage/usr/share/canon-webcam/"
 install -m 0644 "$root/assets/canon-webcam.svg" "$stage/usr/share/icons/hicolor/scalable/apps/camera-bridge.svg"
 install -m 0644 "$root/README.md" "$stage/usr/share/doc/canon-webcam/"
@@ -68,13 +73,13 @@ Replaces: canon-webcam
 Version: $version
 Section: video
 Priority: optional
-Architecture: all
+Architecture: amd64
 Maintainer: Camera Bridge contributors <noreply@github.com>
-Depends: bash, coreutils, procps, python3 (>= 3.10), python3-pyqt5, fonts-dejavu-core, gphoto2, ffmpeg, v4l2loopback-dkms, v4l2loopback-utils, v4l-utils, systemd, libnotify-bin, policykit-1
+Depends: bash, coreutils, procps, python3 (>= 3.10), python3-pyqt5, fonts-dejavu-core, gphoto2, ffmpeg, v4l2loopback-dkms, v4l2loopback-utils, v4l-utils, systemd, libnotify-bin, policykit-1, libc6, libstdc++6, libgcc-s1, libusb-1.0-0
 Recommends: linux-headers-generic
 Homepage: https://github.com/M45-Software/Camera-Bridge
 Description: Virtual webcam for compatible Canon cameras with KDE tray controls
- Persistent gphoto2 and ffmpeg virtual webcam with status cards,
+ Canon SDK capture with gphoto2 fallback and a persistent ffmpeg virtual webcam,
  automatic app-driven capture, native resolution, and idle live-view shutdown, and Qt settings and tray controls.
 EOF
 printf '/etc/modules-load.d/canon-webcam.conf\n/etc/modprobe.d/canon-webcam.conf\n/etc/xdg/autostart/canon-webcam-tray.desktop\n/etc/xdg/autostart/camera-bridge-webcam.desktop\n' > "$stage/DEBIAN/conffiles"
@@ -90,4 +95,4 @@ chmod 0755 "$stage/DEBIAN/postinst"
 find "$stage" -type d -exec chmod 0755 {} +
 find "$stage" -type f -exec chmod 0644 {} +
 chmod 0755 "$stage/usr/bin/camera-bridge" "$stage/DEBIAN/postinst"
-dpkg-deb --root-owner-group --build "$stage" "$root/dist/camera-bridge_${version}_all.deb"
+dpkg-deb --root-owner-group --build "$stage" "$root/dist/camera-bridge_${version}_amd64.deb"

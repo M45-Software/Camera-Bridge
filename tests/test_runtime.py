@@ -98,6 +98,16 @@ sleep() { printf '1111' >"$XDG_RUNTIME_DIR/canon-webcam/control-pid"; }
             result = self.run_script('', 'stream', '--timeout', value)
             self.assertNotEqual(result.returncode, 0, value)
 
+    def test_backend_selection_config_and_cli(self):
+        self.config('CAPTURE_BACKEND=1\n')
+        result = self.run_script('stream_camera() { echo "$CAPTURE_BACKEND"; }', 'stream', '--backend', 'gphoto2')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], '2')
+        result = self.run_script('stream_camera() { echo "$CAPTURE_BACKEND"; }', 'stream')
+        self.assertEqual(result.stdout.splitlines()[-1], '1')
+        result = self.run_script('', 'stream', '--backend', 'bad')
+        self.assertNotEqual(result.returncode, 0)
+
     def test_standby_preserves_writer_and_stops_fallback(self):
         result = self.run_script('''stream_camera() {
 LOOPBACK_WRITER_PID=12345

@@ -74,10 +74,14 @@ jobs:
           if not match:
               raise SystemExit('A release tag such as v0.2.0 is required.')
           version = match[1]
-          release = json.loads(subprocess.check_output(['gh', 'release', 'view', tag, '--json', 'isDraft']))
+          release = json.loads(subprocess.check_output(['gh', 'release', 'view', tag, '--json', 'isDraft,assets']))
           if release['isDraft']:
               raise SystemExit('Draft releases cannot be published to APT.')
-          filename = f'camera-bridge_{version}_all.deb'
+          available = {asset['name'] for asset in release['assets']}
+          filename = next((f'camera-bridge_{version}_{arch}.deb' for arch in ('amd64', 'all')
+                           if f'camera-bridge_{version}_{arch}.deb' in available), None)
+          if filename is None:
+              raise SystemExit('Release has no supported Camera Bridge Debian package.')
           subprocess.run(['gh', 'release', 'download', tag, '--pattern', filename,
                           '--pattern', 'SHA256SUMS', '--dir', 'release'], check=True)
           package = Path('release') / filename

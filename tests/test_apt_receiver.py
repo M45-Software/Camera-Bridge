@@ -14,6 +14,26 @@ spec.loader.exec_module(receiver)
 
 
 class ReceiverTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('dpkg-deb'), 'dpkg-deb is required')
+    def test_bundled_runtime_architecture_is_accepted_but_arm64_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            fixture = state / 'fixture/DEBIAN'
+            fixture.mkdir(parents=True)
+            for architecture in ('amd64', 'arm64'):
+                (fixture / 'control').write_text(f'Package: camera-bridge\nVersion: 1.2.3\nArchitecture: {architecture}\nMaintainer: M45 Test\nDescription: receiver fixture\n')
+                package = state / 'fixture.deb'
+                subprocess.run(['dpkg-deb', '--root-owner-group', '--build', str(fixture.parent), str(package)], check=True, capture_output=True)
+                data = package.read_bytes()
+                command = f'publish camera-bridge 1.2.3 {len(data)} {hashlib.sha256(data).hexdigest()}'
+                published = []
+                if architecture == 'amd64':
+                    receiver.receive(command, io.BytesIO(data), state, lambda p: published.append(p.read_bytes()))
+                    self.assertEqual(published, [data])
+                else:
+                    with self.assertRaises(ValueError):
+                        receiver.receive(command, io.BytesIO(data), state, lambda p: self.fail('Wrong architecture published'))
+
     def test_rejects_shell_commands_and_invalid_upload_parameters(self):
         for command in ['sh', 'uname -a', 'publish m45-drive-watcher 1.0.0 1 ' + 'a' * 64, 'publish m45-other 1.0.0 1 ' + 'a' * 64,
                         'publish camera-bridge ../../file 1 ' + 'a' * 64,
