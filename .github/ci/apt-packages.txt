@@ -1,0 +1,6 @@
+python3-pyqt5
+fonts-dejavu-core
+ffmpeg
+shellcheck
+dpkg-dev
+gnupg

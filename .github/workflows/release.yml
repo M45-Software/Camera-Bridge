@@ -14,7 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install test tools
-        run: sudo apt-get update && sudo apt-get install -y python3-pyqt5 fonts-dejavu-core ffmpeg xvfb xauth shellcheck dpkg-dev gnupg
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages-file: .github/ci/apt-packages.txt
       - name: Validate
         run: |
           bash -n canon-webcam.sh packaging/build-deb.sh tools/preview.sh
@@ -27,7 +29,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then version="${GITHUB_REF_NAME#v}"; fi
           bash packaging/build-deb.sh "$version"
           cd dist
-          sha256sum *.deb > SHA256SUMS
+          sha256sum -- *.deb > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: camera-bridge-debian

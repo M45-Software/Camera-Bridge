@@ -24,6 +24,15 @@ change the version whenever package bytes change.
 
 See [APT release automation](apt-repository.md) for deployment setup and retries.
 
+CI dependencies are listed in `.github/ci/apt-packages.txt`. The local
+`setup-build-deps` action caches downloaded `.deb` archives and installs only
+required packages, without recommendations. APT still refreshes its indexes and
+resolves and verifies dependencies on every run. Cache keys include the runner
+image, architecture, manifest hash, and day; older matching caches seed new keys.
+The first run populates the cache, and later runs download only missing package
+versions. APT publication uses the tested release assets and needs no development
+tool installation.
+
 ## Test without replacing the installed app
 
 Stop the installed webcam first, then run:
