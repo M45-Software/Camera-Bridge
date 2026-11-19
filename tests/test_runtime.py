@@ -19,6 +19,7 @@ class RuntimeTests(unittest.TestCase):
         self.env = dict(os.environ, CANON_WEBCAM_ON_DEMAND='0', CANON_WEBCAM_NATIVE_RESOLUTION='0', HOME=str(self.home), XDG_CONFIG_HOME=str(self.home / '.config'))
         self.script = self.home / 'runtime.sh'
         shutil.copy(ROOT / 'canon-webcam-runtime.py', self.home)
+        shutil.copy(ROOT / 'canon_webcam_jpeg.py', self.home)
 
     def run_script(self, extra, *args):
         self.script.write_text(SOURCE + '\n' + extra + '\nmain "$@"\n')

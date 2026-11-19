@@ -11,23 +11,21 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class StandbyPipelineTests(unittest.TestCase):
-    def test_stalled_camera_pauses_producers_but_preserves_open_writer(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'runtime').mkdir()
-            shutil.copy(ROOT / 'canon-webcam-runtime.py', root)
-            camera = root / 'gphoto2'
-            camera.write_text('''#!/usr/bin/python3
+def fake_pipeline(root):
+    (root / 'runtime').mkdir()
+    shutil.copy(ROOT / 'canon-webcam-runtime.py', root)
+    shutil.copy(ROOT / 'canon_webcam_jpeg.py', root)
+    camera = root / 'gphoto2'
+    camera.write_text('''#!/usr/bin/python3
 import sys, time
 if '--auto-detect' in sys.argv:
     print('Model Port\\n----- ----\\nCanon usb:001,002')
-else:
+elif '--capture-movie' in sys.argv:
     time.sleep(30)
 ''')
-            camera.chmod(0o755)
-            source = (ROOT / 'canon-webcam.sh').read_text().rsplit('main "$@"', 1)[0]
-            source += '''
+    camera.chmod(0o755)
+    source = (ROOT / 'canon-webcam.sh').read_text().rsplit('main "$@"', 1)[0]
+    source += '''
 ensure_loopback_for_writer() { :; }
 stop_camera_mount_helpers() { :; }
 camera_wait_stable() { return 0; }
@@ -44,19 +42,28 @@ start_loopback_writer() {
   echo "$LOOPBACK_WRITER_PID" >"$CANON_TEST_ROOT/writer-pid"
 }
 run_test_source_feeder_ffmpeg() {
-  for frame in 1 2 3; do printf fallback; done >"$CAMERA_FIFO"
+  printf '%s' "$1" >"${2:-$CAMERA_FIFO}"
 }
 stop_background_test_source() {
   if [[ -n "$TEST_SOURCE_PID" ]]; then terminate_process "$TEST_SOURCE_PID"; TEST_SOURCE_PID=""; fi
 }
 main "$@"
 '''
-            script = root / 'webcam.sh'
-            script.write_text(source)
-            script.chmod(0o755)
-            environment = dict(os.environ, CANON_WEBCAM_ON_DEMAND='0', CANON_WEBCAM_NATIVE_RESOLUTION='0', HOME=str(root), XDG_CONFIG_HOME=str(root / 'config'),
-                               XDG_RUNTIME_DIR=str(root / 'runtime'), CANON_WEBCAM_IN_SERVICE='1',
-                               CANON_TEST_ROOT=str(root), PATH=str(root) + ':' + os.environ['PATH'])
+    script = root / 'webcam.sh'
+    script.write_text(source)
+    script.chmod(0o755)
+    environment = dict(os.environ, CANON_WEBCAM_ON_DEMAND='0', CANON_WEBCAM_NATIVE_RESOLUTION='0',
+                       HOME=str(root), XDG_CONFIG_HOME=str(root / 'config'),
+                       XDG_RUNTIME_DIR=str(root / 'runtime'), CANON_WEBCAM_IN_SERVICE='1',
+                       CANON_TEST_ROOT=str(root), PATH=str(root) + ':' + os.environ['PATH'])
+    return script, environment
+
+
+class StandbyPipelineTests(unittest.TestCase):
+    def test_stalled_camera_pauses_producers_but_preserves_open_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script, environment = fake_pipeline(root)
             process = subprocess.Popen([str(script), 'stream', '--device', '/dev/null', '--timeout', '1'],
                                        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             status = root / 'runtime/canon-webcam/status'
@@ -93,6 +100,88 @@ main "$@"
             self.assertIn(b'Video paused', stdout)
             with self.assertRaises(ProcessLookupError):
                 os.kill(writer_pid, 0)
+
+    def test_sdk_session_survives_idle_and_reopen_until_rest_timer_expires(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script, environment = fake_pipeline(root)
+            active = root / 'sessions'
+            active.touch()
+            (root / 'canon-webcam-capture.py').write_text('''import os, signal, sys, time
+from pathlib import Path
+
+if '--prefers-sdk' in sys.argv:
+    sys.exit(0)
+
+def record(event):
+    with (Path(os.environ['CANON_TEST_ROOT']) / 'sessions').open('a') as out:
+        print(event, time.monotonic(), file=out)
+
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+sdk = Path(os.environ['CANON_WEBCAM_SDK_ACTIVE_FILE'])
+record('opened')
+sdk.touch()
+try:
+    while True:
+        os.write(1, bytes.fromhex('ffd8ffd9'))
+        time.sleep(0.02)
+finally:
+    record('closed')
+    sdk.unlink(missing_ok=True)
+''')
+            # An isolated character device lets the real watcher detect app handles.
+            master, slave = os.openpty()
+            device = os.ttyname(slave)
+            os.close(slave)
+            status = root / 'runtime/canon-webcam/status'
+            logfile = root / 'stream.log'
+            rest = 2
+            with logfile.open('w') as log:
+                process = subprocess.Popen([str(script), 'stream', '--device', device, '--on-demand',
+                                            '--backend', 'edsdk', '--timeout', str(rest)],
+                                           env=environment, stdout=log, stderr=subprocess.STDOUT)
+
+            def until(predicate):
+                deadline = time.monotonic() + 5
+                while not predicate():
+                    self.assertIsNone(process.poll(), logfile.read_text())
+                    self.assertLess(time.monotonic(), deadline, logfile.read_text())
+                    time.sleep(0.02)
+
+            def state():
+                return status.read_text().strip() if status.exists() else ''
+
+            def open_app():
+                return os.fdopen(os.open(device, os.O_RDONLY | os.O_NOCTTY), 'rb', buffering=0)
+
+            try:
+                until(lambda: state().startswith('Standby:'))
+                with open_app():
+                    until(lambda: state() == 'Capturing Canon live view')
+                first_close = time.monotonic()
+                until(lambda: state().startswith('Standby:'))
+                output = root / 'frames'
+                until(lambda: output.read_bytes().endswith(b'Waiting for a video app'))
+                size = output.stat().st_size
+                time.sleep(0.6)
+                self.assertEqual(output.stat().st_size, size, 'SDK grace must pause the outgoing video')
+                self.assertNotIn('closed', active.read_text())
+
+                with open_app():
+                    until(lambda: state() == 'Capturing Canon live view')
+                    time.sleep(max(0, first_close + rest + 0.35 - time.monotonic()))
+                    self.assertEqual(active.read_text().count('opened'), 1)
+                    self.assertNotIn('closed', active.read_text(), 'Reopening must cancel the old deadline')
+                    second_close = time.monotonic()
+                until(lambda: 'closed' in active.read_text())
+                _, closed_at = active.read_text().splitlines()[-1].split()
+                self.assertGreaterEqual(float(closed_at) - second_close, rest)
+                self.assertIn('Canon SDK live-view rest delay elapsed', logfile.read_text())
+                self.assertNotIn('Showing status card: Lost connection', logfile.read_text())
+            finally:
+                process.terminate()
+                process.wait(timeout=12)
+                os.close(master)
 
 
 if __name__ == '__main__':

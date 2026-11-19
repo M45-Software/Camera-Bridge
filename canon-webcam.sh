@@ -58,6 +58,7 @@ START_SERVICE=0
 TEST_SOURCE_PID=""
 LAST_STATUS_FRAME=""
 CAMERA_GPHOTO_PID=""
+CAMERA_STREAM_INTERRUPTED=0
 LOOPBACK_WRITER_PID=""
 CAMERA_FIFO=""
 CAMERA_FIFO_DIR=""
@@ -403,6 +404,7 @@ install_binary() {
     run_privileged install -m 0644 "$(dirname "$self")/canon-webcam-runtime.py" /usr/share/canon-webcam/canon-webcam-runtime.py
     run_privileged install -m 0644 "$(dirname "$self")/canon-webcam-capture.py" /usr/share/canon-webcam/canon-webcam-capture.py
     run_privileged install -m 0644 "$(dirname "$self")/canon_webcam_controls.py" /usr/share/canon-webcam/canon_webcam_controls.py
+    run_privileged install -m 0644 "$(dirname "$self")/canon_webcam_jpeg.py" /usr/share/canon-webcam/canon_webcam_jpeg.py
     if [[ -f "$(dirname "$self")/vendor/canon/linux-x86_64/libEDSDK.so" && "$(uname -m)" == x86_64 ]]; then
       run_privileged install -D -m 0644 "$(dirname "$self")/vendor/canon/linux-x86_64/libEDSDK.so" /usr/lib/camera-bridge/libEDSDK.so
     fi
@@ -1024,6 +1026,7 @@ run_test_source_ffmpeg() {
 
 run_test_source_feeder_ffmpeg() {
   local message="${1:-Waiting for a video app}"
+  local output="${2:-$CAMERA_FIFO}"
   local title_size=$(( WIDTH / 44 )) message_size=$(( WIDTH / 28 )) detail_size=$(( WIDTH / 48 ))
   local detail="Select Camera-Bridge in your video app to begin." icon=idle frames=3 rate="$FPS"
   local pacing=() animation="" icon_size=$(( HEIGHT / 5 ))
@@ -1056,7 +1059,7 @@ run_test_source_feeder_ffmpeg() {
     -loop 1 -i "$asset_dir/status-${icon}.png" \
     -filter_complex_threads 1 \
     -filter_complex "[1:v]scale=${icon_size}:${icon_size}[icon];[0:v][icon]overlay=(W-w)/2:H*0.20,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='Camera Bridge':fontcolor=0x9ca9bb:fontsize=${title_size}:x=(w-text_w)/2:y=h*0.45,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='${message}':fontcolor=white:fontsize=${message_size}:x=(w-text_w)/2:y=h*0.53,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='${detail}':fontcolor=0x9ca9bb:fontsize=${detail_size}:x=(w-text_w)/2:y=h*0.64${animation},format=yuvj420p" \
-    -frames:v "$frames" -threads 1 -vcodec mjpeg -q:v 3 -f image2pipe "$CAMERA_FIFO"
+    -frames:v "$frames" -threads 1 -vcodec mjpeg -q:v 3 -f image2pipe "$output"
 }
 
 start_loopback_writer() {
@@ -1170,6 +1173,7 @@ stop_camera_stream_processes() {
   fi
 
   if [[ -n "${CAMERA_FIFO_DIR:-}" ]]; then
+    rm -f "$CAMERA_FIFO_DIR/"{lost-connection,waiting}.mjpeg
     rmdir "$CAMERA_FIFO_DIR" >/dev/null 2>&1 || true
     CAMERA_FIFO_DIR=""
   fi
@@ -1185,10 +1189,35 @@ runtime_helper_path() {
   fi
 }
 
+interrupt_camera_stream() {
+  if [[ -n "${CAMERA_GPHOTO_PID:-}" ]]; then
+    CAMERA_STREAM_INTERRUPTED=1
+    terminate_process "$CAMERA_GPHOTO_PID"
+  fi
+}
+
 pause_encoding() {
   CAMERA_IDLE=1
-  if [[ -n "${CAMERA_GPHOTO_PID:-}" ]]; then
-    terminate_process "$CAMERA_GPHOTO_PID"
+  # The relay pauses video output while the SDK keeps live view open.
+  if [[ ! -f "${CANON_WEBCAM_SDK_IDLE_FILE:-}" || ! -f "${CANON_WEBCAM_SDK_ACTIVE_FILE:-}" ]]; then
+    interrupt_camera_stream
+  fi
+}
+
+resume_encoding() {
+  CAMERA_IDLE=0
+  CAMERA_RECOVERY_WAIT=0
+  END_LIVE_VIEW=0
+}
+
+request_live_view_rest() {
+  END_LIVE_VIEW=1
+  # The watcher clears the idle request before an app resumes, which also
+  # cancels a rest signal that has already been queued.
+  if (( CAMERA_IDLE == 1 && CAMERA_STREAM_INTERRUPTED == 0 )) &&
+    [[ -f "${CANON_WEBCAM_SDK_IDLE_FILE:-}" && -f "${CANON_WEBCAM_SDK_ACTIVE_FILE:-}" ]]; then
+    log "Canon SDK live-view rest delay elapsed"
+    interrupt_camera_stream
   fi
 }
 
@@ -1261,6 +1290,7 @@ standby_encoding() {
 
 run_camera_stream_once() {
   (( CAMERA_IDLE == 0 )) || return 0
+  CAMERA_STREAM_INTERRUPTED=0
   local status
   local capture=(gphoto2 --stdout --capture-movie)
 
@@ -1269,20 +1299,35 @@ run_camera_stream_once() {
   if (( CAMERA_SEGMENT_SECONDS > 0 )); then
     capture=(gphoto2 --stdout "--capture-movie=${CAMERA_SEGMENT_SECONDS}s")
   fi
-  local capture_helper
+  local capture_helper lost_card="" idle_card=""
   capture_helper="$(dirname "$(runtime_helper_path)")/canon-webcam-capture.py"
   if [[ -f "$capture_helper" ]]; then
     capture=(/usr/bin/python3 "$capture_helper" --seconds "$CAMERA_SEGMENT_SECONDS")
+    lost_card="$CAMERA_FIFO_DIR/lost-connection.mjpeg"
+    if [[ ! -s "$lost_card" ]] && ! run_test_source_feeder_ffmpeg "Lost connection" "$lost_card"; then
+      rm -f "$lost_card"
+      lost_card=""
+    fi
+    if [[ -n "${CANON_WEBCAM_SDK_IDLE_FILE:-}" && "$CAPTURE_BACKEND" != 2 ]]; then
+      idle_card="$CAMERA_FIFO_DIR/waiting.mjpeg"
+      if [[ ! -s "$idle_card" ]] && ! run_test_source_feeder_ffmpeg "Waiting for a video app" "$idle_card"; then
+        rm -f "$idle_card"
+        idle_card=""
+      fi
+    fi
   fi
+  (( CAMERA_IDLE == 0 )) || return 0
   # Only the relay can confirm that a complete camera frame has arrived.
   if (( CAMERA_RECOVERY_WAIT == 0 )); then write_stream_state "Starting camera..."; fi
-  if [[ -n "${CANON_WEBCAM_ACTIVITY_FILE:-}" ]]; then
-    CANON_WEBCAM_LIVE_VIEW_SIZE="$LIVE_VIEW_SIZE" /usr/bin/python3 "$(runtime_helper_path)" relay "$CAMERA_FIFO" "${capture[@]}" &
+  if [[ -n "${CANON_WEBCAM_ACTIVITY_FILE:-}$lost_card" ]]; then
+    CANON_WEBCAM_LOST_CONNECTION_CARD="$lost_card" CANON_WEBCAM_IDLE_CARD="$idle_card" \
+      CANON_WEBCAM_LIVE_VIEW_SIZE="$LIVE_VIEW_SIZE" \
+      /usr/bin/python3 "$(runtime_helper_path)" relay "$CAMERA_FIFO" "${capture[@]}" &
   else
     "${capture[@]}" >"$CAMERA_FIFO" &
   fi
   CAMERA_GPHOTO_PID="$!"
-  if (( CAMERA_IDLE == 1 )); then terminate_process "$CAMERA_GPHOTO_PID"; fi
+  if (( CAMERA_IDLE == 1 )); then pause_encoding; fi
 
   # Control signals can interrupt Bash wait before the capture process exits.
   # Keep tracking that process until it really exits; otherwise it can retain USB.
@@ -1290,6 +1335,7 @@ run_camera_stream_once() {
     if wait "$CAMERA_GPHOTO_PID"; then status=0; else status="$?"; fi
     if ! kill -0 "$CAMERA_GPHOTO_PID" >/dev/null 2>&1; then break; fi
   done
+  if [[ -n "${CANON_WEBCAM_SDK_ACTIVE_FILE:-}" ]]; then rm -f "$CANON_WEBCAM_SDK_ACTIVE_FILE"; fi
 
   if [[ -r "${CANON_WEBCAM_FRAME_STATS:-}" ]]; then
     if /usr/bin/python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("frames",0)>0 else 1)' "$CANON_WEBCAM_FRAME_STATS"; then
@@ -1320,9 +1366,8 @@ stream_camera() {
   trap cleanup_stream EXIT
   trap 'cleanup_stream; exit 0' INT TERM
   trap pause_encoding USR1
-  trap 'CAMERA_IDLE=0; CAMERA_RECOVERY_WAIT=0' HUP
-  trap 'CAMERA_IDLE=0; CAMERA_RECOVERY_WAIT=0' USR2
-  trap 'END_LIVE_VIEW=1' ALRM
+  trap resume_encoding HUP USR2
+  trap request_live_view_rest ALRM
 
   need_cmd gphoto2
   need_cmd ffmpeg
@@ -1402,6 +1447,7 @@ stream_camera() {
         fi
 
         stream_duration=$(( $(date +%s) - started_at ))
+        (( CAMERA_STREAM_INTERRUPTED == 0 )) || break
         if [[ "$status" -eq 0 && "$stream_duration" -ge "$normal_segment_min" ]]; then
           backoff_delay="$CAMERA_FAILURE_DELAY"
           log "Canon segment ended after ${stream_duration}s; restarting capture immediately"
@@ -1412,7 +1458,7 @@ stream_camera() {
       done
     fi
 
-    (( CAMERA_IDLE == 0 )) || continue
+    (( CAMERA_IDLE == 0 && CAMERA_STREAM_INTERRUPTED == 0 )) || continue
 
     if (( stream_duration >= 60 )); then
       backoff_delay="$CAMERA_FAILURE_DELAY"
@@ -1678,6 +1724,7 @@ uninstall_all() {
     /usr/share/canon-webcam/canon-webcam-runtime.py \
     /usr/share/canon-webcam/canon-webcam-capture.py \
     /usr/share/canon-webcam/canon_webcam_controls.py \
+    /usr/share/canon-webcam/canon_webcam_jpeg.py \
     /usr/lib/camera-bridge/libEDSDK.so \
     /usr/share/canon-webcam/status-{idle,starting,warning,disconnected}.png \
     /usr/share/canon-webcam/warning.svg \

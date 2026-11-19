@@ -5,11 +5,18 @@ import json
 import stat
 from pathlib import Path
 import re
+import select
 import signal
 import subprocess
 import sys
 import tempfile
 import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from canon_webcam_jpeg import take_jpegs
+
+
+FRAME_GAP_SECONDS = 0.5
 
 
 def jpeg_size(data):
@@ -45,14 +52,14 @@ def jpeg_size(data):
     return None
 
 
-def publish_camera_frame(size=None):
+def publish_stream_status(message, size=None):
     if os.environ.get('CANON_WEBCAM_IN_SERVICE') != '1' or not os.environ.get('XDG_RUNTIME_DIR'):
         return
     runtime = Path(os.environ['XDG_RUNTIME_DIR']) / 'canon-webcam'
     try:
         runtime.mkdir(parents=True, exist_ok=True)
         temporary = runtime / 'status.frame'
-        temporary.write_text('Capturing Canon live view\n')
+        temporary.write_text(message + '\n')
         temporary.replace(runtime / 'status')
         if size:
             root = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'canon-webcam'
@@ -105,8 +112,20 @@ def activity(path):
     temporary.replace(destination)
 
 
+def write_video(output, data):
+    remaining = memoryview(data)
+    while remaining:
+        remaining = remaining[output.write(remaining):]
+
+
+def show_lost_connection(output, card):
+    write_video(output, card)
+    publish_stream_status('Lost connection')
+    print('[camera-bridge] Showing status card: Lost connection', flush=True)
+
+
 def relay(fifo, command):
-    """Forward camera bytes unchanged; fallback frames never go through here."""
+    """Forward camera JPEGs and replace a stalled feed with a status card."""
     child = None
     interrupted = False
     def stop(_signum, _frame):
@@ -119,38 +138,101 @@ def relay(fifo, command):
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    if os.environ.get('CANON_WEBCAM_FRAME_STATS'):
-        Path(os.environ['CANON_WEBCAM_FRAME_STATS']).unlink(missing_ok=True)
+    stats_file = os.environ.get('CANON_WEBCAM_FRAME_STATS')
+    stats_path = Path(stats_file) if stats_file else None
+    if stats_path is not None:
+        stats_path.unlink(missing_ok=True)
+    activity_path = os.environ.get('CANON_WEBCAM_ACTIVITY_FILE')
+    card_path = os.environ.get('CANON_WEBCAM_LOST_CONNECTION_CARD')
+    card = Path(card_path).read_bytes() if card_path else b''
+    idle_card_path = os.environ.get('CANON_WEBCAM_IDLE_CARD')
+    idle_card = Path(idle_card_path).read_bytes() if idle_card_path else b''
+    sdk_active_file = os.environ.get('CANON_WEBCAM_SDK_ACTIVE_FILE')
+    sdk_idle_file = os.environ.get('CANON_WEBCAM_SDK_IDLE_FILE')
+    sdk_active = Path(sdk_active_file) if sdk_active_file else None
+    sdk_idle = Path(sdk_idle_file) if sdk_idle_file else None
+    follow_sdk_idle = sdk_active is not None and sdk_idle is not None
+    framed = bool(card) or follow_sdk_idle
+    pending = bytearray()
     frames = JPEGFrames()
     first_frame = None
+    last_frame = None
+    lost_connection = False
+    paused = False
     last_report = 0
     size_reported = False
     try:
         with open(fifo, 'wb', buffering=0) as output:
             child = subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=0)
+            fd = child.stdout.fileno()
             while True:
-                data = os.read(child.stdout.fileno(), 65536)
+                sdk_paused = follow_sdk_idle and sdk_idle.exists() and (paused or sdk_active.exists())
+                if sdk_paused and not paused:
+                    write_video(output, idle_card)
+                    publish_stream_status('Standby: Waiting for a video app. Virtual webcam ready.')
+                    print('[camera-bridge] Video paused; Canon SDK live view remains on', flush=True)
+                    # Standby images and discarded camera frames never count as activity.
+                    last_frame = None
+                    last_report = frames.count = 0
+                    lost_connection = False
+                    if stats_path is not None:
+                        stats_path.unlink(missing_ok=True)
+                elif paused and not sdk_paused:
+                    if first_frame is not None and sdk_active.exists():
+                        last_frame = time.monotonic()
+                    first_frame = None
+                paused = sdk_paused
+                delay = 0.1 if follow_sdk_idle else None
+                if card and last_frame is not None and not lost_connection:
+                    remaining = last_frame + FRAME_GAP_SECONDS - time.monotonic()
+                    if remaining <= 0:
+                        show_lost_connection(output, card)
+                        lost_connection = True
+                    else:
+                        delay = remaining if delay is None else min(delay, remaining)
+                if delay is not None and not select.select([fd], [], [], delay)[0]:
+                    continue
+                data = os.read(fd, 262144)
                 if not data:
                     break
-                remaining = memoryview(data)
-                while remaining:
-                    remaining = remaining[output.write(remaining):]
-                if frames.feed(data):
-                    activity(os.environ['CANON_WEBCAM_ACTIVITY_FILE'])
+                packets = (data,)
+                if framed:
+                    # Switch between camera and status cards at JPEG boundaries.
+                    pending.extend(data)
+                    packets = take_jpegs(pending)
+                for packet in packets:
+                    if paused:
+                        continue
+                    write_video(output, packet)
+                    if framed:
+                        frames.count += 1
+                        if frames.size is None:
+                            frames.size = jpeg_size(packet)
+                    elif not frames.feed(packet):
+                        continue
+                    if activity_path:
+                        activity(activity_path)
                     now = time.monotonic()
-                    if first_frame is None:
+                    starting = first_frame is None
+                    if starting:
                         first_frame = now
-                        publish_camera_frame()
                     if frames.size and not size_reported:
-                        publish_camera_frame(frames.size)
+                        publish_stream_status('Capturing Canon live view', frames.size)
                         size_reported = True
-                    if os.environ.get('CANON_WEBCAM_FRAME_STATS') and now - last_report >= 0.5:
+                    elif starting or lost_connection:
+                        publish_stream_status('Capturing Canon live view')
+                    last_frame = now
+                    lost_connection = False
+                    if stats_path is not None and now - last_report >= 0.5:
                         elapsed = now - first_frame
-                        write_json(Path(os.environ['CANON_WEBCAM_FRAME_STATS']),
+                        write_json(stats_path,
                                    {'frames': frames.count, 'fps': (frames.count - 1) / elapsed if elapsed else 0,
                                     'last_frame': now})
                         last_report = now
-            return child.wait()
+            status = child.wait()
+            if status and card and last_frame is not None and not lost_connection:
+                show_lost_connection(output, card)
+            return status
     finally:
         if child is not None:
             if child.poll() is None:
@@ -259,6 +341,8 @@ def watch(seconds, command):
         ready = root / 'ready'
         wanted_file = root / 'wanted'
         stats_file = root / 'frames.json'
+        sdk_active = root / 'sdk-active'
+        sdk_idle = root / 'sdk-idle'
         reset_at = time.monotonic()
         paused_at = reset_at
         last_activity = reset_at
@@ -321,7 +405,8 @@ def watch(seconds, command):
         environment = dict(os.environ, CANON_WEBCAM_ACTIVITY_FILE=str(path),
                            CANON_WEBCAM_CONTROL_READY=str(ready), CANON_WEBCAM_DEMAND_FILE=str(wanted_file),
                            CANON_WEBCAM_START_IDLE=str(int(demand_mode)), CANON_WEBCAM_WATCHED='1',
-                           CANON_WEBCAM_FRAME_STATS=str(stats_file), CANON_WEBCAM_PAUSE_FILE=str(pause_file))
+                           CANON_WEBCAM_FRAME_STATS=str(stats_file), CANON_WEBCAM_PAUSE_FILE=str(pause_file),
+                           CANON_WEBCAM_SDK_ACTIVE_FILE=str(sdk_active), CANON_WEBCAM_SDK_IDLE_FILE=str(sdk_idle))
         child = subprocess.Popen(command, env=environment, start_new_session=True)
         try:
             while child.poll() is None:
@@ -334,9 +419,12 @@ def watch(seconds, command):
                 now = time.monotonic()
                 if ready.exists():
                     clients, uncertain = consumers(os.environ.get('CANON_WEBCAM_DEVICE', '/dev/video42'), child.pid) if demand_mode else ([], False)
+                    now = time.monotonic()
                     desired = not forced_off and (bool(clients) or forced or not demand_mode)
                     usage = {'clients': clients, 'uncertain': uncertain, 'automatic': demand_mode,
                              'manual_override': forced, 'manual_off': forced_off}
+                    if sdk_active.exists():
+                        usage['sdk_live_view'] = True
                     try:
                         stats = json.loads(stats_file.read_text())
                         if desired and now - stats['last_frame'] < 2:
@@ -348,7 +436,11 @@ def watch(seconds, command):
                         write_json(usage_path, usage)
                         previous_usage = usage
                     if desired != wanted:
-                        wanted_file.write_text('1' if desired else '0')
+                        if desired or forced_off:
+                            sdk_idle.unlink(missing_ok=True)
+                        else:
+                            sdk_idle.touch()
+                        write_json(wanted_file, int(desired))
                         wanted = desired
                         live_view_stopped = False
                         if desired:
@@ -357,11 +449,11 @@ def watch(seconds, command):
                             child.send_signal(signal.SIGUSR2)
                         else:
                             no_clients_since = now
-                            if not idle:
+                            if not idle or forced_off:
                                 idle = True
                                 paused_at = now
                                 child.send_signal(signal.SIGUSR1)
-                    # Let Bash handle producer shutdown before sending ALRM.
+                    # Let Bash handle the pause before sending ALRM.
                     # Back-to-back standard signals can otherwise leave its
                     # interrupted wait handling only the live-view request.
                     rest_delay = 0.25 if forced_off else seconds

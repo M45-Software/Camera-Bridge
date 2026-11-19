@@ -17,6 +17,7 @@ install -m 0644 "$root/assets/warning.svg" "$stage/usr/share/canon-webcam/warnin
 install -m 0644 "$root/canon-webcam-runtime.py" "$stage/usr/share/canon-webcam/"
 install -m 0644 "$root/canon-webcam-capture.py" "$stage/usr/share/canon-webcam/"
 install -m 0644 "$root/canon_webcam_controls.py" "$stage/usr/share/canon-webcam/"
+install -m 0644 "$root/canon_webcam_jpeg.py" "$stage/usr/share/canon-webcam/"
 install -D -m 0644 "$root/vendor/canon/linux-x86_64/libEDSDK.so" "$stage/usr/lib/camera-bridge/libEDSDK.so"
 printf '%s  %s\n' '92aeae98d2d18f641df72695733d68a55993b4149a13a075983895775eaf91b5' "$stage/usr/lib/camera-bridge/libEDSDK.so" | sha256sum -c -
 install -m 0644 "$root/THIRD_PARTY_NOTICES.md" "$stage/usr/share/doc/canon-webcam/"

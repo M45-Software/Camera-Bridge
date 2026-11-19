@@ -13,17 +13,18 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('capture', ROOT / 'canon-webcam-capture.py')
 capture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capture)
+from canon_webcam_jpeg import jpeg_end
 # APP payload deliberately includes an EOI; it must not truncate the frame.
 JPEG = b'\xff\xd8\xff\xe1\x00\x06\xff\xd9zz\xff\xd9'
 
 
 class CaptureTests(unittest.TestCase):
     def test_jpeg_boundaries_ignore_embedded_markers_and_partial_reads(self):
-        self.assertEqual(capture.jpeg_end(JPEG + JPEG), len(JPEG))
+        self.assertEqual(jpeg_end(JPEG + JPEG), len(JPEG))
         for cut in range(2, len(JPEG)):
-            self.assertIsNone(capture.jpeg_end(JPEG[:cut]), cut)
+            self.assertIsNone(jpeg_end(JPEG[:cut]), cut)
         with self.assertRaises(ValueError):
-            capture.jpeg_end(b'\xff\xd8\xff\xe1\x00\x01')
+            jpeg_end(b'\xff\xd8\xff\xe1\x00\x01')
 
     def test_explicit_sdk_failure_never_uses_gphoto(self):
         with patch.object(capture, 'forward', return_value=False) as forward, patch.object(capture, 'gphoto_command') as gphoto:

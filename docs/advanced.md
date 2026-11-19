@@ -93,8 +93,10 @@ The detector does not request root privileges or change process permissions.
 
 If an app is missed, turn off **Use the camera automatically** to keep video on.
 Turning off **Let the camera rest when not in use** disables idle live-view shutdown
-and the no-image timeout. With automatic use enabled, processing still pauses when
-the last detected app closes the webcam.
+and the no-image timeout. With automatic use enabled, video output pauses when
+the last detected app closes the webcam. The Canon SDK keeps live view on for the
+configured rest delay. Reopening an app during the delay resumes the same camera
+session.
 
 **Manage Canon live view automatically** can be disabled if you need to operate
 live view on the camera yourself. An unconfirmed state is labeled **Live view not
@@ -127,8 +129,8 @@ options. Turning off webcam login also disables legacy per-user service enableme
 
 ## Recovery and status cards
 
-A persistent writer keeps the virtual webcam open while camera capture and image
-processing pause. The kernel repeats the final status image. Idle/error cards
+A persistent writer keeps the virtual webcam open while video output pauses. The
+kernel repeats the final status image. Idle/error cards
 render only on state changes; starting adds a bounded two-second pulse. Background
 retries retain the warning card until real images arrive.
 

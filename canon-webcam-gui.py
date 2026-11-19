@@ -737,13 +737,16 @@ class Webcam(QWidget):
         identity = connected_camera()
         live_view = 'unknown'
         if self.running and identity:
-            try:
-                lines = (Path(os.environ['XDG_RUNTIME_DIR']) / 'canon-webcam/live-view').read_text().splitlines()
-                # Ignore a previous USB session's live-view state after reconnect.
-                if len(lines) > 1 and identity in lines[1]:
-                    live_view = lines[0]
-            except (OSError, KeyError):
-                pass
+            if usage.get('sdk_live_view'):
+                live_view = 'on'
+            else:
+                try:
+                    lines = (Path(os.environ['XDG_RUNTIME_DIR']) / 'canon-webcam/live-view').read_text().splitlines()
+                    # Ignore a previous USB session's live-view state after reconnect.
+                    if len(lines) > 1 and identity in lines[1]:
+                        live_view = lines[0]
+                except (OSError, KeyError):
+                    pass
         apps = list(dict.fromkeys(client['name'] for client in usage.get('clients', [])))
         icon, rows = tray_presentation(bool(identity), self.running, live_view,
                                       usage.get('camera_frames', 0) > 0,

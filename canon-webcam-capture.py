@@ -14,6 +14,7 @@ import time
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from canon_webcam_controls import CameraControls, ControlServer, remote_request, safe_handle
+from canon_webcam_jpeg import take_jpegs
 
 
 class PropertyDesc(c.Structure):
@@ -36,46 +37,6 @@ def backend():
 
 def log(message):
     print(f'Camera Bridge: {message}', file=sys.stderr, flush=True)
-
-
-def jpeg_end(data):
-    """Respect JPEG segment lengths, embedded thumbnails and entropy stuffing."""
-    pos = 2
-    while pos < len(data):
-        if data[pos] != 255:
-            raise ValueError('Invalid camera JPEG marker')
-        while pos < len(data) and data[pos] == 255:
-            pos += 1
-        if pos >= len(data):
-            return None
-        marker = data[pos]
-        pos += 1
-        if marker == 0xd9:
-            return pos
-        if marker == 1 or 0xd0 <= marker <= 0xd8:
-            continue
-        if pos + 2 > len(data):
-            return None
-        length = int.from_bytes(data[pos:pos+2], 'big')
-        if length < 2:
-            raise ValueError('Invalid camera JPEG segment')
-        pos += length
-        if pos > len(data):
-            return None
-        if marker == 0xda:
-            while True:
-                found = data.find(b'\xff', pos)
-                if found < 0 or found + 1 >= len(data):
-                    return None
-                following = data[found+1]
-                if following == 0 or 0xd0 <= following <= 0xd7:
-                    pos = found + 2
-                elif following == 255:
-                    pos = found + 1
-                else:
-                    pos = found
-                    break
-    return None
 
 
 def write_all(data):
@@ -205,6 +166,9 @@ def sdk_worker():
     server = None
     try:
         sdk.open()
+        active_file = os.environ.get('CANON_WEBCAM_SDK_ACTIVE_FILE')
+        if active_file:
+            Path(active_file).touch()
         if os.environ.get('XDG_RUNTIME_DIR'):
             try:
                 server = ControlServer(controls)
@@ -267,7 +231,7 @@ def gphoto_command():
     return ['gphoto2', '--stdout', '--capture-movie']
 
 
-def forward(command, label, seconds, timeout=12):
+def forward(command, label, seconds, timeout=12, *, sdk_idle=None):
     """Forward complete JPEGs only, bounding startup and stalled-camera waits."""
     child = subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=0)
     buffer = bytearray()
@@ -278,7 +242,12 @@ def forward(command, label, seconds, timeout=12):
     try:
         while True:
             now = time.monotonic()
-            if first is not None and seconds and now - first >= seconds:
+            if sdk_idle is not None and sdk_idle.exists():
+                # The idle timer owns shutdown during the rest delay.
+                last = now
+                if first is not None:
+                    first = now
+            elif first is not None and seconds and now - first >= seconds:
                 return True
             if now - last > timeout:
                 log(f'{label} produced no frames for {timeout}s')
@@ -291,22 +260,11 @@ def forward(command, label, seconds, timeout=12):
             if not chunk:
                 return first is not None and seconds > 0 and time.monotonic() - first >= max(0, seconds - 0.5)
             buffer.extend(chunk)
-            if len(buffer) > 32 * 1024 * 1024:
-                raise ValueError('Camera frame buffer exceeded 32 MiB')
-            while buffer:
-                start = buffer.find(b'\xff\xd8')
-                if start < 0:
-                    buffer[:] = buffer[-1:]
-                    break
-                del buffer[:start]
-                end = jpeg_end(buffer)
-                if end is None:
-                    break
+            for frame in take_jpegs(buffer):
                 if first is None:
                     first = time.monotonic()
                     log(f'Capturing with {label}')
-                write_all(buffer[:end])
-                del buffer[:end]
+                write_all(frame)
                 last = time.monotonic()
     finally:
         selector.close()
@@ -325,13 +283,22 @@ def capture(seconds=0, selected=None):
     if selected not in ('auto', 'edsdk', 'gphoto2'):
         raise ValueError('Capture backend must be auto, edsdk, or gphoto2')
     if selected != 'gphoto2':
+        active_file = os.environ.get('CANON_WEBCAM_SDK_ACTIVE_FILE')
+        idle_file = os.environ.get('CANON_WEBCAM_SDK_IDLE_FILE')
+        sdk_idle = Path(idle_file) if idle_file else None
         try:
-            if forward([sys.executable, str(Path(__file__).resolve()), '--sdk-worker'], 'Canon SDK', seconds):
+            if forward([sys.executable, str(Path(__file__).resolve()), '--sdk-worker'], 'Canon SDK', seconds,
+                       sdk_idle=sdk_idle):
                 return 0
         except (OSError, ValueError) as error:
             log(str(error))
+        finally:
+            if active_file:
+                Path(active_file).unlink(missing_ok=True)
         if selected == 'edsdk':
             log('Canon SDK capture failed; explicit backend selection disables fallback')
+            return 1
+        if sdk_idle is not None and sdk_idle.exists():
             return 1
         log('Canon SDK unavailable or stopped; falling back to gphoto2')
     return 0 if forward(gphoto_command(), 'gphoto2', seconds) else 1

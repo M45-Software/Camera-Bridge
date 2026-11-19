@@ -49,6 +49,54 @@ class FrameMonitorTests(unittest.TestCase):
                 self.assertEqual(output.read_bytes(), payload)
                 self.assertEqual(state.exists(), payload.endswith(b'\xff\xd9'))
 
+    def test_stalled_live_feed_outputs_lost_card_then_resumes_after_complete_frame(self):
+        first = b'\xff\xd8\xff\xd9'
+        # An embedded end marker in an unfinished frame must leave the card visible.
+        partial = b'\xff\xd8\xff\xe1\x00\x06\xff\xd9zz'
+        end = b'\xff\xd9'
+        card = b'\xff\xd8\xff\xfe\x00\x06lost\xff\xd9'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            activity = root / 'last-frame'
+            output = root / 'video'
+            (root / 'card').write_bytes(card)
+            runtime = root / 'run'
+            status = runtime / 'canon-webcam/status'
+            resume = root / 'resume'
+            capture = f'''import os, time
+from pathlib import Path
+os.write(1, {first + partial!r})
+while not Path({str(resume)!r}).exists():
+    time.sleep(0.01)
+os.write(1, {end!r})
+'''
+            env = dict(os.environ, CANON_WEBCAM_ACTIVITY_FILE=str(activity),
+                       CANON_WEBCAM_LOST_CONNECTION_CARD=str(root / 'card'),
+                       CANON_WEBCAM_IN_SERVICE='1', XDG_RUNTIME_DIR=str(runtime))
+            with subprocess.Popen([sys.executable, str(HELPER), 'relay', str(output),
+                                   sys.executable, '-c', capture], env=env, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE) as relay:
+                try:
+                    deadline = time.monotonic() + 4
+                    while not status.exists() or status.read_text() != 'Lost connection\n':
+                        self.assertIsNone(relay.poll())
+                        self.assertLess(time.monotonic(), deadline, 'Lost connection card did not appear')
+                        time.sleep(0.01)
+                    last_frame = float(activity.read_text())
+                    self.assertGreaterEqual(time.monotonic() - last_frame, monitor.FRAME_GAP_SECONDS)
+                    self.assertEqual(output.read_bytes(), first + card)
+                    resume.touch()
+                    stdout, stderr = relay.communicate(timeout=4)
+                    self.assertEqual(relay.returncode, 0, stderr.decode())
+                    self.assertIn(b'Showing status card: Lost connection', stdout)
+                    self.assertEqual(output.read_bytes(), first + card + partial + end)
+                    self.assertEqual(status.read_text(), 'Capturing Canon live view\n')
+                    self.assertGreater(float(activity.read_text()), last_frame)
+                finally:
+                    if relay.poll() is None:
+                        relay.terminate()
+                        relay.communicate(timeout=4)
+
     def test_live_frames_prevent_idle_then_standby_and_resume_keep_process(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
